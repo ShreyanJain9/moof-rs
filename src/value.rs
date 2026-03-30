@@ -3,6 +3,8 @@ use std::fmt;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use indexmap::IndexMap;
+
 use crate::ast::Expr;
 use crate::environment::Env;
 
@@ -16,18 +18,41 @@ pub enum Value {
     Nil,
     Symbol(String),
     List(Vec<Value>),
-    Map(Vec<(String, Value)>),     // ordered map (preserves insertion order)
+    Map(IndexMap<String, Value>),   // ordered map (preserves insertion order, O(1) lookup)
     Function(MoofFunction),
     Builtin(String, BuiltinFn),    // name, function pointer
     Class(Rc<RefCell<MoofClass>>),
     Object(MoofObject),
     Protocol(MoofProtocol),
     Macro(MoofMacro),
-    // Internal
-    TailCall(Box<Value>, Vec<Value>),  // func, args — for TCO
+}
+
+/// Internal evaluation result — separates TCO control flow from user-visible values.
+pub enum Eval {
+    Val(Value),
+    TailCall { func: Value, args: Vec<Value> },
 }
 
 pub type BuiltinFn = fn(&mut crate::interpreter::Interpreter, Vec<Value>) -> crate::error::Result<Value>;
+
+/// Built-in method: takes (interpreter, receiver, args).
+pub type BuiltinMethodFn = fn(&mut crate::interpreter::Interpreter, Value, Vec<Value>) -> crate::error::Result<Value>;
+
+/// A method is either a user-defined function or a Rust built-in.
+#[derive(Clone)]
+pub enum Method {
+    UserDefined(MoofFunction),
+    Builtin(String, BuiltinMethodFn), // name, function
+}
+
+impl fmt::Debug for Method {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Method::UserDefined(func) => write!(f, "Method::UserDefined({:?})", func.name),
+            Method::Builtin(name, _) => write!(f, "Method::Builtin({})", name),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MoofFunction {
@@ -44,7 +69,7 @@ pub struct MoofClass {
     pub superclass: Option<Rc<RefCell<MoofClass>>>,
     pub fields: Vec<String>,
     pub own_fields: Vec<String>,
-    pub methods: HashMap<String, MoofFunction>,
+    pub methods: HashMap<String, Method>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +82,7 @@ pub struct MoofObject {
 pub struct MoofProtocol {
     pub name: String,
     pub selectors: Vec<String>,
+    pub default_methods: HashMap<String, MoofFunction>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +113,7 @@ impl MoofClass {
         fields
     }
 
-    pub fn lookup(&self, selector: &str) -> Option<MoofFunction> {
+    pub fn lookup(&self, selector: &str) -> Option<Method> {
         if let Some(m) = self.methods.get(selector) {
             return Some(m.clone());
         }
@@ -97,7 +123,15 @@ impl MoofClass {
         None
     }
 
-    pub fn reopen(&mut self, new_fields: Vec<String>, new_methods: HashMap<String, MoofFunction>) {
+    pub fn register_builtin(&mut self, selector: &str, f: BuiltinMethodFn) {
+        self.methods.insert(selector.to_string(), Method::Builtin(selector.to_string(), f));
+    }
+
+    pub fn method_names(&self) -> Vec<String> {
+        self.methods.keys().cloned().collect()
+    }
+
+    pub fn reopen(&mut self, new_fields: Vec<String>, new_methods: HashMap<String, Method>) {
         for f in new_fields {
             if !self.own_fields.contains(&f) {
                 self.own_fields.push(f.clone());
@@ -142,9 +176,9 @@ impl fmt::Display for Value {
                 }
                 write!(f, ")")
             }
-            Value::Map(pairs) => {
+            Value::Map(map) => {
                 write!(f, "{{")?;
-                for (i, (k, v)) in pairs.iter().enumerate() {
+                for (i, (k, v)) in map.iter().enumerate() {
                     if i > 0 { write!(f, " ")?; }
                     write!(f, "{k}: {v}")?;
                 }
@@ -175,7 +209,6 @@ impl fmt::Display for Value {
             }
             Value::Protocol(p) => write!(f, "<protocol {} [{}]>", p.name, p.selectors.join(" ")),
             Value::Macro(m) => write!(f, "<macro {}>", m.name),
-            Value::TailCall(_, _) => write!(f, "<tailcall>"),
         }
     }
 }
@@ -194,6 +227,58 @@ impl Value {
         !matches!(self, Value::Bool(false) | Value::Nil)
     }
 
+    // ── Typed accessors ────────────────────────────────────────────
+
+    pub fn as_int(&self) -> crate::error::Result<i64> {
+        match self {
+            Value::Integer(n) => Ok(*n),
+            other => Err(crate::error::MoofError::runtime(format!("Expected Integer, got {}", other.type_name()))),
+        }
+    }
+
+    pub fn as_float(&self) -> crate::error::Result<f64> {
+        match self {
+            Value::Float(n) => Ok(*n),
+            other => Err(crate::error::MoofError::runtime(format!("Expected Float, got {}", other.type_name()))),
+        }
+    }
+
+    pub fn as_number(&self) -> crate::error::Result<f64> {
+        match self {
+            Value::Integer(n) => Ok(*n as f64),
+            Value::Float(n) => Ok(*n),
+            other => Err(crate::error::MoofError::runtime(format!("Expected number, got {}", other.type_name()))),
+        }
+    }
+
+    pub fn as_str(&self) -> crate::error::Result<&str> {
+        match self {
+            Value::Str(s) => Ok(s),
+            other => Err(crate::error::MoofError::runtime(format!("Expected String, got {}", other.type_name()))),
+        }
+    }
+
+    pub fn as_list(&self) -> crate::error::Result<&[Value]> {
+        match self {
+            Value::List(v) => Ok(v),
+            other => Err(crate::error::MoofError::runtime(format!("Expected List, got {}", other.type_name()))),
+        }
+    }
+
+    pub fn into_list(self) -> crate::error::Result<Vec<Value>> {
+        match self {
+            Value::List(v) => Ok(v),
+            other => Err(crate::error::MoofError::runtime(format!("Expected List, got {}", other.type_name()))),
+        }
+    }
+
+    pub fn as_bool(&self) -> crate::error::Result<bool> {
+        match self {
+            Value::Bool(b) => Ok(*b),
+            other => Err(crate::error::MoofError::runtime(format!("Expected Bool, got {}", other.type_name()))),
+        }
+    }
+
     pub fn type_name(&self) -> String {
         match self {
             Value::Integer(_) => "Integer".to_string(),
@@ -210,7 +295,6 @@ impl Value {
             Value::Object(o) => o.class.borrow().name.clone(),
             Value::Protocol(_) => "Protocol".to_string(),
             Value::Macro(_) => "Macro".to_string(),
-            Value::TailCall(_, _) => "TailCall".to_string(),
         }
     }
 }

@@ -107,9 +107,8 @@ fn match_map(
     let mut bindings = Vec::new();
 
     for (key, sub_pattern) in pairs {
-        let found = map_pairs.iter().find(|(k, _)| k == key);
-        match found {
-            Some((_, val)) => {
+        match map_pairs.get(key) {
+            Some(val) => {
                 let result = match_pattern(sub_pattern, val, interp);
                 if !result.success {
                     return MatchResult::failure();

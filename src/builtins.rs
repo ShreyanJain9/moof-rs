@@ -429,7 +429,7 @@ fn builtin_send(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
         _ => return Err(MoofError::runtime("__send: selector must be a string or symbol")),
     };
     let msg_args = args[2..].to_vec();
-    crate::dispatcher::send_message(interp, receiver, &selector, msg_args)
+    crate::methods::send_message(interp, receiver, &selector, msg_args)
 }
 
 // ── Apply ───────────────────────────────────────────────────────

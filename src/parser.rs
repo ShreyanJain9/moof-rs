@@ -196,14 +196,10 @@ impl Parser {
         let mut args = Vec::new();
         while !matches!(self.current().ty, TokenType::RParen) {
             if let TokenType::ColonId(_) = &self.current().ty {
-                let kw_tok = self.advance();
-                let keyword = extract_colon_id(&kw_tok.ty);
+                // Keyword arg: just skip the keyword label, keep the value
+                self.advance();
                 let value = self.parse_expression()?;
-                args.push(Expr::KeywordArg(
-                    keyword,
-                    Box::new(value),
-                    Loc::new(kw_tok.line, kw_tok.column),
-                ));
+                args.push(value);
             } else {
                 args.push(self.parse_expression()?);
             }
@@ -225,7 +221,8 @@ impl Parser {
             self.expect(&TokenType::RParen, "Expected ')' after params")?;
             let body = self.parse_body_until(&TokenType::RParen)?;
             self.expect(&TokenType::RParen, "Expected ')' to close define")?;
-            Ok(Expr::DefineFunction(name, params, rest_param, Box::new(body), Loc::new(ln, col)))
+            let lambda = Expr::Lambda(params, rest_param, Box::new(body), Loc::new(ln, col));
+            Ok(Expr::Define(name, Box::new(lambda), Loc::new(ln, col)))
         } else {
             let (name, _, _) = self.expect_identifier("Expected variable name")?;
             let value = self.parse_expression()?;
@@ -330,23 +327,32 @@ impl Parser {
 
     fn parse_cond(&mut self, ln: usize, col: usize) -> Result<Expr> {
         self.pos += 1; // skip 'cond'
-        let mut clauses = Vec::new();
+        let mut clauses: Vec<(Option<Expr>, Expr)> = Vec::new(); // None = else
         while matches!(self.current().ty, TokenType::LParen) {
             self.pos += 1; // skip (
             if self.check_ident("else") {
                 self.pos += 1; // skip 'else'
                 let expr = self.parse_expression()?;
                 self.expect(&TokenType::RParen, "Expected ')' to close else clause")?;
-                clauses.push((CondTest::Else, expr));
+                clauses.push((None, expr));
             } else {
                 let test = self.parse_expression()?;
                 let expr = self.parse_expression()?;
                 self.expect(&TokenType::RParen, "Expected ')' to close cond clause")?;
-                clauses.push((CondTest::Expr(test), expr));
+                clauses.push((Some(test), expr));
             }
         }
         self.expect(&TokenType::RParen, "Expected ')' to close cond")?;
-        Ok(Expr::Cond(clauses, Loc::new(ln, col)))
+        // Desugar to nested if: (cond (a b) (c d) (else e)) → (if a b (if c d e))
+        let loc = Loc::new(ln, col);
+        let mut result = Expr::Nil(loc.clone());
+        for (test, body) in clauses.into_iter().rev() {
+            match test {
+                None => result = body,
+                Some(t) => result = Expr::If(Box::new(t), Box::new(body), Some(Box::new(result)), loc.clone()),
+            }
+        }
+        Ok(result)
     }
 
     fn parse_and(&mut self, ln: usize, col: usize) -> Result<Expr> {
@@ -354,7 +360,8 @@ impl Parser {
         let left = self.parse_expression()?;
         let right = self.parse_expression()?;
         self.expect(&TokenType::RParen, "Expected ')' to close and")?;
-        Ok(Expr::And(Box::new(left), Box::new(right), Loc::new(ln, col)))
+        // (and a b) → (if a b false)
+        Ok(Expr::If(Box::new(left), Box::new(right), Some(Box::new(Expr::Bool(false, Loc::new(ln, col)))), Loc::new(ln, col)))
     }
 
     fn parse_or(&mut self, ln: usize, col: usize) -> Result<Expr> {
@@ -362,7 +369,20 @@ impl Parser {
         let left = self.parse_expression()?;
         let right = self.parse_expression()?;
         self.expect(&TokenType::RParen, "Expected ')' to close or")?;
-        Ok(Expr::Or(Box::new(left), Box::new(right), Loc::new(ln, col)))
+        // (or a b) → (let ((__or_tmp a)) (if __or_tmp __or_tmp b))
+        let loc = Loc::new(ln, col);
+        let tmp = format!("__or_{}", ln);
+        let tmp_id = Expr::Identifier(tmp.clone(), loc.clone());
+        Ok(Expr::Let(
+            vec![(tmp.clone(), left)],
+            Box::new(Expr::If(
+                Box::new(tmp_id.clone()),
+                Box::new(tmp_id),
+                Some(Box::new(right)),
+                loc.clone(),
+            )),
+            loc,
+        ))
     }
 
     // ── Class & Trait ────────────────────────────────────────────────

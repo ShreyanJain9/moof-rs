@@ -58,6 +58,15 @@ impl MoofError {
     }
 }
 
+impl MoofError {
+    /// Attach source location if not already present.
+    pub fn with_loc(mut self, line: Option<usize>, col: Option<usize>) -> Self {
+        if self.line.is_none() { self.line = line; }
+        if self.column.is_none() { self.column = col; }
+        self
+    }
+}
+
 impl fmt::Display for MoofError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.message)?;

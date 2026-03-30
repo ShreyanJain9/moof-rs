@@ -29,11 +29,6 @@ fn normalize_expr(expr: Expr) -> Expr {
             Expr::Define(name, Box::new(normalize_expr(*value)), loc)
         }
 
-        // DefineFunction
-        Expr::DefineFunction(name, params, rest, body, loc) => {
-            Expr::DefineFunction(name, params, rest, Box::new(normalize_expr(*body)), loc)
-        }
-
         // Lambda
         Expr::Lambda(params, rest, body, loc) => {
             Expr::Lambda(params, rest, Box::new(normalize_expr(*body)), loc)
@@ -96,39 +91,6 @@ fn normalize_expr(expr: Expr) -> Expr {
             )
         }
 
-        // Cond
-        Expr::Cond(clauses, loc) => {
-            let clauses = clauses
-                .into_iter()
-                .map(|(test, body)| {
-                    let test = match test {
-                        CondTest::Else => CondTest::Else,
-                        CondTest::Expr(e) => CondTest::Expr(normalize_expr(e)),
-                    };
-                    (test, normalize_expr(body))
-                })
-                .collect();
-            Expr::Cond(clauses, loc)
-        }
-
-        // And
-        Expr::And(left, right, loc) => {
-            Expr::And(
-                Box::new(normalize_expr(*left)),
-                Box::new(normalize_expr(*right)),
-                loc,
-            )
-        }
-
-        // Or
-        Expr::Or(left, right, loc) => {
-            Expr::Or(
-                Box::new(normalize_expr(*left)),
-                Box::new(normalize_expr(*right)),
-                loc,
-            )
-        }
-
         // MapLiteral
         Expr::MapLiteral(pairs, loc) => {
             let pairs = pairs
@@ -179,11 +141,6 @@ fn normalize_expr(expr: Expr) -> Expr {
         // SelectorRef: desugar into lambda
         Expr::SelectorRef(selector, partial_args, loc) => {
             desugar_selector_ref(&selector, partial_args, &loc)
-        }
-
-        // KeywordArg: normalize the value
-        Expr::KeywordArg(keyword, value, loc) => {
-            Expr::KeywordArg(keyword, Box::new(normalize_expr(*value)), loc)
         }
 
         // Match

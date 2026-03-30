@@ -35,20 +35,15 @@ pub enum Expr {
     // -- Calls --
     Call(Box<Expr>, Vec<Expr>, Loc),                    // (func arg1 arg2)
     MessageSend(Box<Expr>, String, Vec<Expr>, Loc),     // [receiver selector args...]
-    KeywordArg(String, Box<Expr>, Loc),                 // port: 443 inside a call
 
     // -- Special Forms --
     Define(String, Box<Expr>, Loc),                     // (define name value)
-    DefineFunction(String, Vec<String>, Option<String>, Box<Expr>, Loc), // name, params, rest_param, body
     Lambda(Vec<String>, Option<String>, Box<Expr>, Loc), // params, rest_param, body
     If(Box<Expr>, Box<Expr>, Option<Box<Expr>>, Loc),   // condition, then, else
     Let(Vec<(String, Expr)>, Box<Expr>, Loc),           // bindings, body
     Do(Vec<Expr>, Loc),
     SetBang(String, Box<Expr>, Loc),
     TryCatch(Box<Expr>, String, Box<Expr>, Loc),        // body, error_name, catch_body
-    Cond(Vec<(CondTest, Expr)>, Loc),
-    And(Box<Expr>, Box<Expr>, Loc),
-    Or(Box<Expr>, Box<Expr>, Loc),
 
     // -- Object System --
     ClassDef {
@@ -69,17 +64,17 @@ pub enum Expr {
     Match(Box<Expr>, Vec<MatchClause>, Loc),
     TypeDef(String, Vec<TypeVariant>, Loc),
 
-    // -- Pipeline --
-    Pipeline(Box<Expr>, Vec<Expr>, Loc),                // (-> value step1 step2)
+    // -- Pipeline (desugared by normalizer, but parser still produces it) --
+    Pipeline(Box<Expr>, Vec<Expr>, Loc),
 
-    // -- String Interpolation --
-    StringInterp(Vec<Expr>, Loc),                       // segments
+    // -- String Interpolation (desugared by normalizer) --
+    StringInterp(Vec<Expr>, Loc),
 
     // -- Protocol --
-    ProtocolDef(String, Vec<String>, Loc),               // name, selectors
+    ProtocolDef(String, Vec<String>, Loc),
 
-    // -- Selector Ref --
-    SelectorRef(String, Vec<Expr>, Loc),                 // selector, partial_args
+    // -- Selector Ref (desugared by normalizer) --
+    SelectorRef(String, Vec<Expr>, Loc),
 
     // -- Macros --
     DefMacro(String, Vec<String>, Box<Expr>, Loc),       // name, params, body
@@ -88,12 +83,6 @@ pub enum Expr {
     ModuleDef(String, Vec<String>, Vec<Expr>, Loc),      // name, exports, body
     UseModule(String, Option<Vec<String>>, Option<String>, Loc), // module_name, imports, alias
     Require(String, Loc),
-}
-
-#[derive(Debug, Clone)]
-pub enum CondTest {
-    Expr(Expr),
-    Else,
 }
 
 #[derive(Debug, Clone)]
@@ -141,11 +130,9 @@ impl Expr {
             Expr::MapLiteral(_, l) | Expr::Quote(_, l) | Expr::Quasiquote(_, l) |
             Expr::Unquote(_, l) | Expr::UnquoteSplice(_, l) |
             Expr::Call(_, _, l) | Expr::MessageSend(_, _, _, l) |
-            Expr::KeywordArg(_, _, l) | Expr::Define(_, _, l) |
-            Expr::DefineFunction(_, _, _, _, l) | Expr::Lambda(_, _, _, l) |
+            Expr::Define(_, _, l) | Expr::Lambda(_, _, _, l) |
             Expr::If(_, _, _, l) | Expr::Let(_, _, l) | Expr::Do(_, l) |
             Expr::SetBang(_, _, l) | Expr::TryCatch(_, _, _, l) |
-            Expr::Cond(_, l) | Expr::And(_, _, l) | Expr::Or(_, _, l) |
             Expr::Match(_, _, l) | Expr::TypeDef(_, _, l) |
             Expr::Pipeline(_, _, l) | Expr::StringInterp(_, l) |
             Expr::ProtocolDef(_, _, l) | Expr::SelectorRef(_, _, l) |

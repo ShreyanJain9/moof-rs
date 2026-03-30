@@ -8,6 +8,7 @@ pub mod parser;
 pub mod normalizer;
 pub mod interpreter;
 pub mod builtins;
-pub mod dispatcher;
+pub mod builtin_methods;
+pub mod methods;
 pub mod pattern_matcher;
 pub mod repl;

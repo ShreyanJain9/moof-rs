@@ -5,6 +5,7 @@ edition = "2024"
 description = "Moof — a Lisp with Smalltalk-style message passing"
 
 [dependencies]
+indexmap = "2.13.0"
 rustyline = "15"
 
 [profile.release]

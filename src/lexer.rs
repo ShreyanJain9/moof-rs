@@ -42,9 +42,6 @@ impl Lexer {
     fn at_end(&self) -> bool { self.pos >= self.source.len() }
 
     fn check(&self, c: char) -> bool { !self.at_end() && self.ch() == c }
-    fn match_char(&mut self, c: char) -> bool {
-        if self.check(c) { self.pos += 1; true } else { false }
-    }
 
     fn emit(&mut self, ty: TokenType, line: usize, col: usize) {
         self.tokens.push(Token::new(ty, line, col));

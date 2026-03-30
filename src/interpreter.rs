@@ -2,41 +2,37 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ast::{Expr, Program, CondTest, MethodDef, Loc};
+use crate::ast::{Expr, Program, MethodDef, Loc};
 use crate::environment::Env;
-use crate::value::{Value, MoofFunction, MoofClass, MoofObject, MoofProtocol, MoofMacro};
+use crate::value::{Value, Eval, Method, MoofFunction, MoofClass, MoofObject, MoofProtocol, MoofMacro};
 use crate::error::{MoofError, Result};
 use crate::builtins;
-use crate::dispatcher;
+use crate::methods;
 use crate::pattern_matcher;
 
 pub struct Interpreter {
     pub global_env: Env,
     pub class_registry: HashMap<String, Rc<RefCell<MoofClass>>>,
-    pub trait_registry: HashMap<String, HashMap<String, MoofFunction>>,
     pub protocol_registry: HashMap<String, MoofProtocol>,
     pub macro_registry: HashMap<String, MoofMacro>,
     pub type_registry: HashMap<String, Vec<String>>,
     pub module_registry: HashMap<String, HashMap<String, Value>>,
-    // Current env for eval_expr (save/restore pattern for lexical scoping)
-    pub env: Env,
 }
 
 impl Interpreter {
     pub fn new() -> Self {
         let global = Env::new();
         let mut interp = Interpreter {
-            global_env: global.clone(),
+            global_env: global,
             class_registry: HashMap::new(),
-            trait_registry: HashMap::new(),
             protocol_registry: HashMap::new(),
             macro_registry: HashMap::new(),
             type_registry: HashMap::new(),
             module_registry: HashMap::new(),
-            env: global,
         };
         interp.register_builtin_classes();
         builtins::install(&mut interp);
+        crate::builtin_methods::install(&mut interp);
         interp
     }
 
@@ -51,24 +47,16 @@ impl Interpreter {
     }
 
     pub fn evaluate(&mut self, program: &Program) -> Result<Value> {
+        let env = self.global_env.clone();
         let mut result = Value::Nil;
         for expr in &program.expressions {
-            result = self.evaluate_node(expr, &self.env.clone())?;
+            result = self.eval_expr(expr, &env)?;
         }
         Ok(result)
     }
 
-    pub fn evaluate_node(&mut self, expr: &Expr, env: &Env) -> Result<Value> {
-        // Save and restore env around evaluation
-        let old_env = self.env.clone();
-        self.env = env.clone();
-        let result = self.eval_expr_inner(expr);
-        self.env = old_env;
-        result
-    }
-
     /// The big match dispatcher for expression evaluation.
-    fn eval_expr_inner(&mut self, expr: &Expr) -> Result<Value> {
+    fn eval_expr_inner(&mut self, expr: &Expr, env: &Env) -> Result<Value> {
         match expr {
             // -- Literals --
             Expr::Integer(n, _) => Ok(Value::Integer(*n)),
@@ -78,44 +66,37 @@ impl Interpreter {
             Expr::Nil(_) => Ok(Value::Nil),
 
             Expr::Identifier(name, loc) => {
-                self.env.get(name).map_err(|_| {
+                env.get(name).map_err(|_| {
                     MoofError::name(name, loc.line, loc.column)
                 })
             }
 
             Expr::Quote(inner, _) => self.quote_value(inner),
 
-            Expr::Quasiquote(inner, _) => self.quasiquote_eval(inner, &self.env.clone()),
+            Expr::Quasiquote(inner, _) => self.quasiquote_eval(inner, env),
 
             Expr::Unquote(_, _) => Err(MoofError::runtime("Unquote (,) outside of quasiquote")),
             Expr::UnquoteSplice(_, _) => Err(MoofError::runtime("Unquote-splice (,@) outside of quasiquote")),
 
             Expr::MapLiteral(pairs, _) => {
-                let mut result = Vec::new();
+                let mut result = indexmap::IndexMap::new();
                 for (key, val_expr) in pairs {
-                    let val = self.eval_expr(val_expr)?;
-                    result.push((key.clone(), val));
+                    let val = self.eval_expr(val_expr, env)?;
+                    result.insert(key.clone(), val);
                 }
                 Ok(Value::Map(result))
             }
 
             Expr::Define(name, value_expr, _) => {
-                let value = self.eval_expr(value_expr)?;
-                self.env.define(name, value.clone(), false);
+                let mut value = self.eval_expr(value_expr, env)?;
+                // Attach name to anonymous lambdas defined at top level
+                if let Value::Function(ref mut f) = value {
+                    if f.name.is_none() {
+                        f.name = Some(name.clone());
+                    }
+                }
+                env.define(name, value.clone(), false);
                 Ok(value)
-            }
-
-            Expr::DefineFunction(name, params, rest_param, body, _) => {
-                let func = MoofFunction {
-                    name: Some(name.clone()),
-                    params: params.clone(),
-                    rest_param: rest_param.clone(),
-                    body: body.clone(),
-                    closure: self.env.clone(),
-                };
-                let val = Value::Function(func);
-                self.env.define(name, val.clone(), false);
-                Ok(val)
             }
 
             Expr::Lambda(params, rest_param, body, _) => {
@@ -124,96 +105,52 @@ impl Interpreter {
                     params: params.clone(),
                     rest_param: rest_param.clone(),
                     body: body.clone(),
-                    closure: self.env.clone(),
+                    closure: env.clone(),
                 }))
             }
 
             Expr::If(cond, then_expr, else_expr, _) => {
-                let cond_val = self.eval_expr(cond)?;
+                let cond_val = self.eval_expr(cond, env)?;
                 if cond_val.is_truthy() {
-                    self.eval_expr(then_expr)
+                    self.eval_expr(then_expr, env)
                 } else if let Some(else_e) = else_expr {
-                    self.eval_expr(else_e)
+                    self.eval_expr(else_e, env)
                 } else {
                     Ok(Value::Nil)
                 }
             }
 
             Expr::Let(bindings, body, _) => {
-                let outer = self.env.clone();
-                let let_env = self.env.child();
-                self.env = let_env;
+                let let_env = env.child();
                 for (name, val_expr) in bindings {
                     // Evaluate binding value in the outer env context
-                    let old = self.env.clone();
-                    self.env = outer.clone();
-                    let val = self.eval_expr(val_expr)?;
-                    self.env = old;
-                    self.env.define(name, val, false);
+                    let val = self.eval_expr(val_expr, env)?;
+                    let_env.define(name, val, false);
                 }
-                let result = self.eval_expr(body);
-                self.env = outer;
-                result
+                self.eval_expr(body, &let_env)
             }
 
             Expr::Do(exprs, _) => {
                 let mut result = Value::Nil;
                 for e in exprs {
-                    result = self.eval_expr(e)?;
+                    result = self.eval_expr(e, env)?;
                 }
                 Ok(result)
             }
 
             Expr::SetBang(name, value_expr, _) => {
-                let value = self.eval_expr(value_expr)?;
-                self.env.set(name, value)
+                let value = self.eval_expr(value_expr, env)?;
+                env.set(name, value)
             }
 
             Expr::TryCatch(body, error_name, catch_body, _) => {
-                match self.eval_expr(body) {
+                match self.eval_expr(body, env) {
                     Ok(val) => Ok(val),
                     Err(e) => {
-                        let old_env = self.env.clone();
-                        self.env = self.env.child();
-                        self.env.define(error_name, Value::Str(e.message.clone()), false);
-                        let result = self.eval_expr(catch_body);
-                        self.env = old_env;
-                        result
+                        let catch_env = env.child();
+                        catch_env.define(error_name, Value::Str(e.message.clone()), false);
+                        self.eval_expr(catch_body, &catch_env)
                     }
-                }
-            }
-
-            Expr::Cond(clauses, _) => {
-                for (test, body) in clauses {
-                    match test {
-                        CondTest::Else => return self.eval_expr(body),
-                        CondTest::Expr(test_expr) => {
-                            let val = self.eval_expr(test_expr)?;
-                            if val.is_truthy() {
-                                return self.eval_expr(body);
-                            }
-                        }
-                    }
-                }
-                Ok(Value::Nil)
-            }
-
-            Expr::And(left, right, _) => {
-                let l = self.eval_expr(left)?;
-                if !l.is_truthy() {
-                    Ok(Value::Bool(false))
-                } else {
-                    let r = self.eval_expr(right)?;
-                    if r.is_truthy() { Ok(r) } else { Ok(Value::Bool(false)) }
-                }
-            }
-
-            Expr::Or(left, right, _) => {
-                let l = self.eval_expr(left)?;
-                if l.is_truthy() {
-                    Ok(l)
-                } else {
-                    self.eval_expr(right)
                 }
             }
 
@@ -221,49 +158,41 @@ impl Interpreter {
                 // Check for macro expansion first
                 if let Expr::Identifier(name, _) = func_expr.as_ref() {
                     if self.macro_registry.contains_key(name) {
-                        return self.expand_and_eval_macro(name, arg_exprs, &self.env.clone());
+                        return self.expand_and_eval_macro(name, arg_exprs, env);
                     }
                 }
 
-                let callee = self.eval_expr(func_expr)?;
-                let args = self.evaluate_call_args(arg_exprs)?;
+                let callee = self.eval_expr(func_expr, env)?;
+                let args = self.evaluate_call_args(arg_exprs, env)?;
                 self.invoke_callee(callee, args, loc)
             }
 
             Expr::MessageSend(receiver_expr, selector, arg_exprs, _) => {
-                let receiver = self.eval_expr(receiver_expr)?;
+                let receiver = self.eval_expr(receiver_expr, env)?;
                 let mut args = Vec::new();
                 for a in arg_exprs {
-                    args.push(self.eval_expr(a)?);
+                    args.push(self.eval_expr(a, env)?);
                 }
-                dispatcher::send_message(self, receiver, selector, args)
-            }
-
-            Expr::KeywordArg(_, value_expr, _) => {
-                self.eval_expr(value_expr)
+                methods::send_message(self, receiver, selector, args)
             }
 
             Expr::Match(scrutinee, clauses, _) => {
-                let val = self.eval_expr(scrutinee)?;
+                let val = self.eval_expr(scrutinee, env)?;
                 for clause in clauses {
                     let m = pattern_matcher::match_pattern(&clause.pattern, &val, self);
                     if m.success {
-                        let old_env = self.env.clone();
-                        self.env = self.env.child();
+                        let match_env = env.child();
                         for (name, bind_val) in &m.bindings {
-                            self.env.define(name, bind_val.clone(), false);
+                            match_env.define(name, bind_val.clone(), false);
                         }
                         // Check guard
                         if let Some(ref guard) = clause.guard {
-                            let guard_val = self.eval_expr(guard)?;
+                            let guard_val = self.eval_expr(guard, &match_env)?;
                             if !guard_val.is_truthy() {
-                                self.env = old_env;
                                 continue;
                             }
                         }
-                        let result = self.eval_expr(&clause.body);
-                        self.env = old_env;
-                        return result;
+                        return self.eval_expr(&clause.body, &match_env);
                     }
                 }
                 Ok(Value::Nil)
@@ -282,7 +211,7 @@ impl Interpreter {
                             class: klass_rc,
                             fields: HashMap::new(),
                         };
-                        self.env.define(&variant.name, Value::Object(obj), false);
+                        env.define(&variant.name, Value::Object(obj), false);
                     } else {
                         // Constructor variant
                         let mut klass = MoofClass::new(variant.name.clone());
@@ -290,7 +219,7 @@ impl Interpreter {
                         klass.fields = variant.fields.clone();
                         let klass_rc = Rc::new(RefCell::new(klass));
                         self.class_registry.insert(variant.name.clone(), klass_rc.clone());
-                        self.env.define(&variant.name, Value::Class(klass_rc), false);
+                        env.define(&variant.name, Value::Class(klass_rc), false);
                     }
                     variant_names.push(variant.name.clone());
                 }
@@ -302,10 +231,11 @@ impl Interpreter {
                 let proto = MoofProtocol {
                     name: name.clone(),
                     selectors: selectors.clone(),
+                    default_methods: HashMap::new(),
                 };
                 self.protocol_registry.insert(name.clone(), proto.clone());
                 let val = Value::Protocol(proto);
-                self.env.define(name, val.clone(), false);
+                env.define(name, val.clone(), false);
                 Ok(val)
             }
 
@@ -316,28 +246,38 @@ impl Interpreter {
                     body: body.clone(),
                 };
                 self.macro_registry.insert(name.clone(), mac.clone());
-                self.env.define(name, Value::Macro(mac), false);
+                env.define(name, Value::Macro(mac), false);
                 Ok(Value::Str(name.clone()))
             }
 
             Expr::ClassDef { name, superclass, fields, methods, traits, loc } => {
-                self.eval_class_def(name, superclass.as_deref(), fields, methods, traits, loc)
+                self.eval_class_def(name, superclass.as_deref(), fields, methods, traits, loc, env)
             }
 
             Expr::TraitDef { name, methods, loc: _ } => {
-                let mut method_table = HashMap::new();
+                // Traits are protocols with default methods
+                let mut default_methods = HashMap::new();
+                let mut selectors = Vec::new();
                 for mdef in methods {
                     let func = MoofFunction {
                         name: Some(format!("{}#{}", name, mdef.selector)),
                         params: mdef.params.clone(),
                         rest_param: None,
                         body: mdef.body.clone(),
-                        closure: self.env.clone(),
+                        closure: env.clone(),
                     };
-                    method_table.insert(mdef.selector.clone(), func);
+                    selectors.push(mdef.selector.clone());
+                    default_methods.insert(mdef.selector.clone(), func);
                 }
-                self.trait_registry.insert(name.clone(), method_table);
-                Ok(Value::Nil)
+                let proto = MoofProtocol {
+                    name: name.clone(),
+                    selectors,
+                    default_methods,
+                };
+                self.protocol_registry.insert(name.clone(), proto.clone());
+                let val = Value::Protocol(proto);
+                env.define(name, val.clone(), false);
+                Ok(val)
             }
 
             Expr::ModuleDef(name, exports, body, _) => {
@@ -345,120 +285,33 @@ impl Interpreter {
             }
 
             Expr::UseModule(module_name, imports, alias, _) => {
-                self.import_module(module_name, imports.as_deref(), alias.as_deref())
+                self.import_module(module_name, imports.as_deref(), alias.as_deref(), env)
             }
 
             Expr::Require(path, _) => {
                 self.require_file(path)
             }
 
-            Expr::Pipeline(initial, steps, _) => {
-                let mut val = self.eval_expr(initial)?;
-                for step in steps {
-                    val = match step {
-                        Expr::Call(f, args, _) => {
-                            let func = self.eval_expr(f)?;
-                            let mut eval_args = vec![val];
-                            for a in args {
-                                eval_args.push(self.eval_expr(a)?);
-                            }
-                            self.invoke_callee(func, eval_args, step.loc())?
-                        }
-                        Expr::Identifier(name, _) => {
-                            let func = self.env.get(name)?;
-                            self.invoke_callee(func, vec![val], step.loc())?
-                        }
-                        Expr::MessageSend(_, selector, arg_exprs, _) => {
-                            let mut args = Vec::new();
-                            for a in arg_exprs {
-                                args.push(self.eval_expr(a)?);
-                            }
-                            dispatcher::send_message(self, val, selector, args)?
-                        }
-                        other => {
-                            let func = self.eval_expr(other)?;
-                            self.invoke_callee(func, vec![val], other.loc())?
-                        }
-                    };
-                }
-                Ok(val)
-            }
-
-            Expr::StringInterp(segments, _) => {
-                let mut result = String::new();
-                for seg in segments {
-                    let val = self.eval_expr(seg)?;
-                    result.push_str(&format!("{}", val));
-                }
-                Ok(Value::Str(result))
-            }
-
-            Expr::SelectorRef(selector, partial_args, _) => {
-                let sel = selector.clone();
-                let mut pargs = Vec::new();
-                for a in partial_args {
-                    pargs.push(self.eval_expr(a)?);
-                }
-                if pargs.is_empty() {
-                    let body = Expr::MessageSend(
-                        Box::new(Expr::Identifier("__sel_receiver".to_string(), Loc::none())),
-                        sel.clone(),
-                        vec![],
-                        Loc::none(),
-                    );
-                    Ok(Value::Function(MoofFunction {
-                        name: Some(format!(".{}", sel)),
-                        params: vec!["__sel_receiver".to_string()],
-                        rest_param: None,
-                        body: Box::new(body),
-                        closure: self.env.clone(),
-                    }))
-                } else {
-                    let closure = self.env.child();
-                    let mut arg_exprs = Vec::new();
-                    for (i, parg) in pargs.into_iter().enumerate() {
-                        let pname = format!("__sel_parg_{}", i);
-                        closure.define(&pname, parg, false);
-                        arg_exprs.push(Expr::Identifier(pname, Loc::none()));
-                    }
-                    let body = Expr::MessageSend(
-                        Box::new(Expr::Identifier("__sel_receiver".to_string(), Loc::none())),
-                        sel.clone(),
-                        arg_exprs,
-                        Loc::none(),
-                    );
-                    Ok(Value::Function(MoofFunction {
-                        name: Some(format!(".{}", sel)),
-                        params: vec!["__sel_receiver".to_string()],
-                        rest_param: None,
-                        body: Box::new(body),
-                        closure,
-                    }))
-                }
+            // Pipeline, StringInterp, SelectorRef are desugared by the normalizer
+            // and should never reach the interpreter.
+            Expr::Pipeline(_, _, _) | Expr::StringInterp(_, _) | Expr::SelectorRef(_, _, _) => {
+                Err(MoofError::runtime("Internal error: un-normalized AST node reached interpreter"))
             }
         }
     }
 
-    /// Public eval_expr that operates on self.env. Used internally.
-    pub fn eval_expr(&mut self, expr: &Expr) -> Result<Value> {
-        self.eval_expr_inner(expr)
+    /// Public eval_expr that takes an explicit env parameter.
+    pub fn eval_expr(&mut self, expr: &Expr, env: &Env) -> Result<Value> {
+        self.eval_expr_inner(expr, env).map_err(|e| {
+            let loc = expr.loc();
+            e.with_loc(loc.line, loc.column)
+        })
     }
 
     // ── Call helpers ─────────────────────────────────────────────
 
-    fn evaluate_call_args(&mut self, arguments: &[Expr]) -> Result<Vec<Value>> {
-        let mut args = Vec::new();
-        for arg in arguments {
-            match arg {
-                Expr::KeywordArg(_, value_expr, _) => {
-                    args.push(self.eval_expr(value_expr)?);
-                }
-                other => {
-                    args.push(self.eval_expr(other)?);
-                }
-            }
-        }
-        Ok(args)
+    fn evaluate_call_args(&mut self, arguments: &[Expr], env: &Env) -> Result<Vec<Value>> {
+        arguments.iter().map(|arg| self.eval_expr(arg, env)).collect()
     }
 
     fn invoke_callee(&mut self, callee: Value, args: Vec<Value>, loc: &Loc) -> Result<Value> {
@@ -519,107 +372,77 @@ impl Interpreter {
 
     // ── Tail call evaluation ────────────────────────────────────
 
-    pub fn evaluate_tail(&mut self, expr: &Expr, env: &Env) -> Result<Value> {
-        let old_env = self.env.clone();
-        self.env = env.clone();
-        let result = self.eval_tail_inner(expr);
-        self.env = old_env;
-        result
+    pub fn evaluate_tail(&mut self, expr: &Expr, env: &Env) -> Result<Eval> {
+        self.eval_tail_inner(expr, env)
     }
 
-    fn eval_tail_inner(&mut self, expr: &Expr) -> Result<Value> {
+    fn eval_tail_inner(&mut self, expr: &Expr, env: &Env) -> Result<Eval> {
         match expr {
             Expr::Call(func_expr, arg_exprs, _loc) => {
                 if let Expr::Identifier(name, _) = func_expr.as_ref() {
                     if self.macro_registry.contains_key(name) {
-                        return self.expand_and_eval_macro(name, arg_exprs, &self.env.clone());
+                        return Ok(Eval::Val(self.expand_and_eval_macro(name, arg_exprs, env)?));
                     }
                 }
-                let callee = self.eval_expr(func_expr)?;
-                let args = self.evaluate_call_args(arg_exprs)?;
+                let callee = self.eval_expr(func_expr, env)?;
+                let args = self.evaluate_call_args(arg_exprs, env)?;
                 if matches!(callee, Value::Function(_)) {
-                    Ok(Value::TailCall(Box::new(callee), args))
+                    Ok(Eval::TailCall { func: callee, args })
                 } else {
-                    self.invoke_callee(callee, args, expr.loc())
+                    Ok(Eval::Val(self.invoke_callee(callee, args, expr.loc())?))
                 }
             }
 
             Expr::If(cond, then_expr, else_expr, _) => {
-                let cond_val = self.eval_expr(cond)?;
+                let cond_val = self.eval_expr(cond, env)?;
                 if cond_val.is_truthy() {
-                    self.eval_tail_inner(then_expr)
+                    self.eval_tail_inner(then_expr, env)
                 } else if let Some(else_e) = else_expr {
-                    self.eval_tail_inner(else_e)
+                    self.eval_tail_inner(else_e, env)
                 } else {
-                    Ok(Value::Nil)
+                    Ok(Eval::Val(Value::Nil))
                 }
             }
 
             Expr::Do(exprs, _) => {
-                if exprs.is_empty() { return Ok(Value::Nil); }
+                if exprs.is_empty() { return Ok(Eval::Val(Value::Nil)); }
                 for e in &exprs[..exprs.len() - 1] {
-                    self.eval_expr(e)?;
+                    self.eval_expr(e, env)?;
                 }
-                self.eval_tail_inner(exprs.last().unwrap())
+                self.eval_tail_inner(exprs.last().unwrap(), env)
             }
 
             Expr::Let(bindings, body, _) => {
-                let outer = self.env.clone();
-                let let_env = self.env.child();
-                self.env = let_env;
+                let let_env = env.child();
                 for (name, val_expr) in bindings {
-                    let old = self.env.clone();
-                    self.env = outer.clone();
-                    let val = self.eval_expr(val_expr)?;
-                    self.env = old;
-                    self.env.define(name, val, false);
+                    let val = self.eval_expr(val_expr, env)?;
+                    let_env.define(name, val, false);
                 }
-                let result = self.eval_tail_inner(body);
-                self.env = outer;
-                result
+                self.eval_tail_inner(body, &let_env)
             }
 
             Expr::Match(scrutinee, clauses, _) => {
-                let val = self.eval_expr(scrutinee)?;
+                let val = self.eval_expr(scrutinee, env)?;
                 for clause in clauses {
                     let m = pattern_matcher::match_pattern(&clause.pattern, &val, self);
                     if m.success {
-                        let old_env = self.env.clone();
-                        self.env = self.env.child();
+                        let match_env = env.child();
                         for (name, bind_val) in &m.bindings {
-                            self.env.define(name, bind_val.clone(), false);
+                            match_env.define(name, bind_val.clone(), false);
                         }
                         if let Some(ref guard) = clause.guard {
-                            let guard_val = self.eval_expr(guard)?;
+                            let guard_val = self.eval_expr(guard, &match_env)?;
                             if !guard_val.is_truthy() {
-                                self.env = old_env;
                                 continue;
                             }
                         }
-                        let result = self.eval_tail_inner(&clause.body);
-                        self.env = old_env;
-                        return result;
+                        return self.eval_tail_inner(&clause.body, &match_env);
                     }
                 }
-                Ok(Value::Nil)
+                Ok(Eval::Val(Value::Nil))
             }
 
-            Expr::Cond(clauses, _) => {
-                for (test, body) in clauses {
-                    match test {
-                        CondTest::Else => return self.eval_tail_inner(body),
-                        CondTest::Expr(test_expr) => {
-                            let val = self.eval_expr(test_expr)?;
-                            if val.is_truthy() {
-                                return self.eval_tail_inner(body);
-                            }
-                        }
-                    }
-                }
-                Ok(Value::Nil)
-            }
-
-            other => self.eval_expr_inner(other),
+            other => Ok(Eval::Val(self.eval_expr_inner(other, env)?)),
         }
     }
 
@@ -644,13 +467,10 @@ impl Interpreter {
             macro_env.define(param, arg_val, false);
         }
 
-        let old_env = self.env.clone();
-        self.env = macro_env;
-        let expanded = self.eval_expr(&mac.body)?;
-        self.env = old_env;
+        let expanded = self.eval_expr(&mac.body, &macro_env)?;
 
         let ast = self.data_to_ast(&expanded);
-        self.evaluate_node(&ast, env)
+        self.eval_expr(&ast, env)
     }
 
     fn data_to_ast(&self, data: &Value) -> Expr {
@@ -699,16 +519,26 @@ impl Interpreter {
                             }
                         }
                         "and" if elements.len() == 3 => {
-                            return Expr::And(
+                            // (and a b) → (if a b false)
+                            return Expr::If(
                                 Box::new(elements[1].clone()),
                                 Box::new(elements[2].clone()),
+                                Some(Box::new(Expr::Bool(false, Loc::none()))),
                                 Loc::none(),
                             );
                         }
                         "or" if elements.len() == 3 => {
-                            return Expr::Or(
-                                Box::new(elements[1].clone()),
-                                Box::new(elements[2].clone()),
+                            // (or a b) → (let ((__or_tmp a)) (if __or_tmp __or_tmp b))
+                            let tmp = "__or_macro_tmp".to_string();
+                            let tmp_id = Expr::Identifier(tmp.clone(), Loc::none());
+                            return Expr::Let(
+                                vec![(tmp, elements[1].clone())],
+                                Box::new(Expr::If(
+                                    Box::new(tmp_id.clone()),
+                                    Box::new(tmp_id),
+                                    Some(Box::new(elements[2].clone())),
+                                    Loc::none(),
+                                )),
                                 Loc::none(),
                             );
                         }
@@ -763,7 +593,7 @@ impl Interpreter {
     fn quasiquote_eval(&mut self, expr: &Expr, env: &Env) -> Result<Value> {
         match expr {
             Expr::Unquote(inner, _) => {
-                self.evaluate_node(inner, env)
+                self.eval_expr(inner, env)
             }
             Expr::UnquoteSplice(_, _) => {
                 Err(MoofError::runtime("Unquote-splice ,@ not valid outside of a list context"))
@@ -811,22 +641,6 @@ impl Interpreter {
                 ];
                 self.qq_list(&elements, env)
             }
-            Expr::And(left, right, _) => {
-                let elements = vec![
-                    Expr::Identifier("and".to_string(), Loc::none()),
-                    left.as_ref().clone(),
-                    right.as_ref().clone(),
-                ];
-                self.qq_list(&elements, env)
-            }
-            Expr::Or(left, right, _) => {
-                let elements = vec![
-                    Expr::Identifier("or".to_string(), Loc::none()),
-                    left.as_ref().clone(),
-                    right.as_ref().clone(),
-                ];
-                self.qq_list(&elements, env)
-            }
             Expr::Quasiquote(inner, _) => {
                 self.quote_value(inner)
             }
@@ -838,7 +652,7 @@ impl Interpreter {
         let mut result = Vec::new();
         for el in elements {
             if let Expr::UnquoteSplice(inner, _) = el {
-                let spliced = self.evaluate_node(inner, env)?;
+                let spliced = self.eval_expr(inner, env)?;
                 match spliced {
                     Value::List(items) => result.extend(items),
                     _ => return Err(MoofError::runtime(",@ value must be a list")),
@@ -860,6 +674,7 @@ impl Interpreter {
         methods: &[MethodDef],
         trait_names: &[String],
         _loc: &Loc,
+        env: &Env,
     ) -> Result<Value> {
         let superclass = if let Some(sc_name) = superclass_name {
             let sc = self.class_registry.get(sc_name)
@@ -869,31 +684,31 @@ impl Interpreter {
             None
         };
 
-        let mut all_trait_methods: HashMap<String, MoofFunction> = HashMap::new();
+        let mut all_trait_methods: HashMap<String, Method> = HashMap::new();
         for trait_name in trait_names {
-            let tmethods = self.trait_registry.get(trait_name)
-                .ok_or_else(|| MoofError::runtime(format!("Unknown trait: {}", trait_name)))?;
-            for (sel, func) in tmethods {
-                all_trait_methods.insert(sel.clone(), func.clone());
+            let proto = self.protocol_registry.get(trait_name)
+                .ok_or_else(|| MoofError::runtime(format!("Unknown trait/protocol: {}", trait_name)))?;
+            for (sel, func) in &proto.default_methods {
+                all_trait_methods.insert(sel.clone(), Method::UserDefined(func.clone()));
             }
         }
 
-        let mut new_methods: HashMap<String, MoofFunction> = HashMap::new();
+        let mut new_methods: HashMap<String, Method> = HashMap::new();
         for mdef in methods {
             let func = MoofFunction {
                 name: Some(format!("{}#{}", name, mdef.selector)),
                 params: mdef.params.clone(),
                 rest_param: None,
                 body: mdef.body.clone(),
-                closure: self.env.clone(),
+                closure: env.clone(),
             };
-            new_methods.insert(mdef.selector.clone(), func);
+            new_methods.insert(mdef.selector.clone(), Method::UserDefined(func));
         }
 
         // Open class: if class already exists, merge into it
         if let Some(existing_rc) = self.class_registry.get(name) {
             let mut existing = existing_rc.borrow_mut();
-            let mut combined_methods: HashMap<String, MoofFunction> = all_trait_methods;
+            let mut combined_methods: HashMap<String, Method> = all_trait_methods;
             combined_methods.extend(new_methods);
             existing.reopen(fields.to_vec(), combined_methods);
             drop(existing);
@@ -901,7 +716,7 @@ impl Interpreter {
         }
 
         // Create new class
-        let mut method_table: HashMap<String, MoofFunction> = all_trait_methods;
+        let mut method_table: HashMap<String, Method> = all_trait_methods;
         method_table.extend(new_methods);
 
         let mut klass = MoofClass::new(name.to_string());
@@ -913,7 +728,7 @@ impl Interpreter {
         let klass_rc = Rc::new(RefCell::new(klass));
         self.class_registry.insert(name.to_string(), klass_rc.clone());
         let val = Value::Class(klass_rc);
-        self.env.define(name, val.clone(), false);
+        env.define(name, val.clone(), false);
         Ok(val)
     }
 
@@ -928,7 +743,7 @@ impl Interpreter {
         let mod_env = self.global_env.child();
 
         for expr in body {
-            self.evaluate_node(expr, &mod_env)?;
+            self.eval_expr(expr, &mod_env)?;
         }
 
         let mut exported = HashMap::new();
@@ -953,8 +768,8 @@ impl Interpreter {
 
         self.module_registry.insert(name.to_string(), exported.clone());
 
-        let map_pairs: Vec<(String, Value)> = exported.into_iter().collect();
-        self.env.define(name, Value::Map(map_pairs), false);
+        let map: indexmap::IndexMap<String, Value> = exported.into_iter().collect();
+        self.global_env.define(name, Value::Map(map), false);
         Ok(Value::Nil)
     }
 
@@ -963,14 +778,15 @@ impl Interpreter {
         module_name: &str,
         imports: Option<&[String]>,
         alias: Option<&str>,
+        env: &Env,
     ) -> Result<Value> {
         let module = self.module_registry.get(module_name)
             .ok_or_else(|| MoofError::runtime(format!("Unknown module: {}", module_name)))?
             .clone();
 
         if let Some(alias_name) = alias {
-            let map_pairs: Vec<(String, Value)> = module.into_iter().collect();
-            self.env.define(alias_name, Value::Map(map_pairs), false);
+            let map: indexmap::IndexMap<String, Value> = module.into_iter().collect();
+            env.define(alias_name, Value::Map(map), false);
         } else if let Some(import_names) = imports {
             for imp in import_names {
                 let val = module.get(imp)
@@ -978,11 +794,11 @@ impl Interpreter {
                         "Module '{}' does not export '{}'",
                         module_name, imp
                     )))?;
-                self.env.define(imp, val.clone(), false);
+                env.define(imp, val.clone(), false);
             }
         } else {
             for (name, val) in &module {
-                self.env.define(name, val.clone(), false);
+                env.define(name, val.clone(), false);
             }
         }
         Ok(Value::Nil)
@@ -1051,13 +867,13 @@ pub fn call_function(interp: &mut Interpreter, func: &MoofFunction, args: Vec<Va
     }
 
     // Evaluate body in tail position, then trampoline
-    let mut result = interp.evaluate_tail(&func.body, &call_env)?;
+    let mut eval_result = interp.evaluate_tail(&func.body, &call_env)?;
 
     // Trampoline loop
     loop {
-        match result {
-            Value::TailCall(callee, tc_args) => {
-                match *callee {
+        match eval_result {
+            Eval::TailCall { func: callee, args: tc_args } => {
+                match callee {
                     Value::Function(ref f) => {
                         if f.is_variadic() {
                             if tc_args.len() < f.params.len() {
@@ -1087,7 +903,7 @@ pub fn call_function(interp: &mut Interpreter, func: &MoofFunction, args: Vec<Va
                             };
                             new_env.define(rest_name, Value::List(rest), false);
                         }
-                        result = interp.evaluate_tail(&f.body, &new_env)?;
+                        eval_result = interp.evaluate_tail(&f.body, &new_env)?;
                     }
                     Value::Builtin(_, f_ptr) => {
                         return f_ptr(interp, tc_args);
@@ -1100,7 +916,7 @@ pub fn call_function(interp: &mut Interpreter, func: &MoofFunction, args: Vec<Va
                     }
                 }
             }
-            other => return Ok(other),
+            Eval::Val(v) => return Ok(v),
         }
     }
 }

@@ -2,19 +2,16 @@
 ;; Moof Standard Library — self-hosting core
 ;;
 ;; This file IS the language. Everything here is written in Moof itself,
-;; running on top of a minimal set of Ruby primitives:
+;; running on top of a minimal set of Rust primitives.
 ;;
-;;   Arithmetic:  + - * / %
-;;   Comparison:  > < >= <=
-;;   Equality:    = eq?
-;;   Data:        list cons car cdr
-;;   I/O:         print display format read-line read-file write-file
-;;                file-exists? read-lines
-;;   Dispatch:    __send apply
-;;   Control:     error exit
-;;   Introspect:  type-of implements? range time
-;;
-;; Everything else is defined HERE.
+;; Built-in type methods (length, uppercase, map:, filter:, etc.) are
+;; registered in Rust on their classes. This stdlib provides:
+;;   - Functional-style wrappers (map, filter, reduce, etc.)
+;;   - Higher-order function utilities (compose, pipe, partial, etc.)
+;;   - Math & numeric utilities
+;;   - ADTs (Option, Result, Pair)
+;;   - Protocols and macros
+;;   - Built-in type extensions (methods written in Moof)
 ;; ═══════════════════════════════════════════════════════════════════════
 
 
@@ -23,7 +20,10 @@
 (define (not x)
   (if x false true))
 
-;; ── Core List Operations (wrappers around [] messages) ─────────────
+;; ── Functional-Style Wrappers ──────────────────────────────────────
+;; These bridge () and [] by letting you write (map f lst) instead of
+;; [lst map: f]. They exist because functional-style is idiomatic for
+;; higher-order operations.
 
 (define (length x)    [x length])
 (define (reverse lst) [lst reverse])
@@ -40,13 +40,12 @@
 
 (define (take n lst)   [lst take: n])
 (define (drop n lst)   [lst drop: n])
-(define (concat a b)   (if (string? a) [a concat: b] (apply list (append a b))))
 (define (zip a b)      [a zip: b])
 (define (nth i lst)    [lst at: i])
 
-;; ── Type Checks (built on type-of) ────────────────────────────────
+;; ── Type Checks ───────────────────────────────────────────────────
 
-(define (number?   x) (let ((t (type-of x))) (or (= t "Integer") (= t "Float"))))
+(define (number?   x) (let ((t (type-of x))) (if (= t "Integer") true (= t "Float"))))
 (define (integer?  x) (= (type-of x) "Integer"))
 (define (float?    x) (= (type-of x) "Float"))
 (define (string?   x) (= (type-of x) "String"))
@@ -54,10 +53,7 @@
 (define (nil?      x) (= (type-of x) "Nil"))
 (define (bool?     x) (= (type-of x) "Bool"))
 (define (function? x) (= (type-of x) "Function"))
-(define (hash?     x) (= (type-of x) "Map"))
 (define (symbol?   x) (= (type-of x) "Symbol"))
-(define (class?    x) (= (type-of x) "Class"))
-(define (protocol? x) (= (type-of x) "Protocol"))
 
 ;; ── Dynamic Message Send ──────────────────────────────────────────
 
@@ -66,7 +62,7 @@
 
 (define (to-string x) [x to_s])
 
-;; ── Assertion (pure Moof) ─────────────────────────────────────────
+;; ── Assertion ─────────────────────────────────────────────────────
 
 (define (assert condition)
   (if condition true (error "Assertion failed")))
@@ -76,38 +72,22 @@
     true
     (error (format "Assertion failed: expected ~a, got ~a" expected actual))))
 
-;; ── String Operations ─────────────────────────────────────────────
-
-(define (string-concat . strs)
-  (reduce { |acc s| [acc concat: (to-string s)] } "" strs))
-
 ;; ── Identity and Composition ──────────────────────────────────────
 
 (define (identity x) x)
-
-(define (compose f g)
-  (lambda (x) (f (g x))))
-
-(define (flip f)
-  (lambda (a b) (f b a)))
-
-(define (constantly x)
-  (lambda (. args) x))
-
-(define (complement pred)
-  (lambda (x) (not (pred x))))
+(define (compose f g) (lambda (x) (f (g x))))
+(define (flip f) (lambda (a b) (f b a)))
+(define (constantly x) (lambda (. args) x))
+(define (complement pred) (lambda (x) (not (pred x))))
 
 (define (pipe . fns)
-  (lambda (x)
-    (reduce { |acc f| (f acc) } x fns)))
+  (lambda (x) (reduce { |acc f| (f acc) } x fns)))
 
 (define (juxt . fns)
-  (lambda (x)
-    (map { |f| (f x) } fns)))
+  (lambda (x) (map { |f| (f x) } fns)))
 
 (define (partial f . bound)
-  (lambda (. args)
-    (apply f (append bound args))))
+  (lambda (. args) (apply f (append bound args))))
 
 ;; ── Numeric Utilities ─────────────────────────────────────────────
 
@@ -116,32 +96,21 @@
 (define (abs x)    (if (< x 0) (- x) x))
 (define (max a b)  (if (> a b) a b))
 (define (min a b)  (if (< a b) a b))
-
 (define (even? n)  (= (% n 2) 0))
 (define (odd? n)   (not (even? n)))
-
-(define (between? n lo hi)
-  (and (>= n lo) (<= n hi)))
-
-(define (clamp n lo hi)
-  (max lo (min hi n)))
-
-(define (gcd a b)
-  (if (= b 0) a (gcd b (% a b))))
-
-(define (lcm a b)
-  (/ (* a b) (gcd a b)))
+(define (between? n lo hi) (if (>= n lo) (<= n hi) false))
+(define (clamp n lo hi) (max lo (min hi n)))
+(define (gcd a b) (if (= b 0) a (gcd b (% a b))))
+(define (lcm a b) (/ (* a b) (gcd a b)))
 
 (define (factorial n)
   (if (<= n 1) 1 (* n (factorial (- n 1)))))
 
 (define (power base exp)
-  (cond
-    ((= exp 0) 1)
-    ((even? exp)
-     (let ((half (power base (/ exp 2))))
-       (* half half)))
-    (else (* base (power base (- exp 1))))))
+  (if (= exp 0) 1
+    (if (even? exp)
+      (let ((half (power base (/ exp 2)))) (* half half))
+      (* base (power base (- exp 1))))))
 
 (define (sum lst)     (reduce + 0 lst))
 (define (product lst) (reduce * 1 lst))
@@ -150,7 +119,6 @@
 
 (define pi 3.141592653589793)
 (define e  2.718281828459045)
-
 (define (degrees->radians d) (* d (/ pi 180)))
 (define (radians->degrees r) (* r (/ 180 pi)))
 
@@ -158,38 +126,32 @@
 
 (define (second lst) [lst at: 1])
 (define (third  lst) [lst at: 2])
-(define (fourth lst) [lst at: 3])
 
 (define (any? pred lst)  [lst any: pred])
 (define (all? pred lst)  [lst all: pred])
 (define (none? pred lst) [lst none: pred])
 
 (define (find pred lst)
-  (cond
-    ((empty? lst) nil)
-    ((pred (car lst)) (car lst))
-    (else (find pred (cdr lst)))))
+  (if (empty? lst) nil
+    (if (pred (car lst)) (car lst)
+      (find pred (cdr lst)))))
 
 (define (append . lists)
   (reduce { |acc lst|
-    (reduce { |a x| (cons x a) }
-      acc
-      (reverse lst))
+    (reduce { |a x| (cons x a) } acc (reverse lst))
   } (list) (reverse lists)))
 
 (define (zip-with f lst1 lst2)
-  (if (or (empty? lst1) (empty? lst2))
+  (if (if (empty? lst1) true (empty? lst2))
     (list)
     (cons (f (car lst1) (car lst2))
           (zip-with f (cdr lst1) (cdr lst2)))))
 
 (define (repeat x n)
-  (if (<= n 0) (list)
-    (cons x (repeat x (- n 1)))))
+  (if (<= n 0) (list) (cons x (repeat x (- n 1)))))
 
 (define (partition pred lst)
-  (list (filter pred lst)
-        (filter (complement pred) lst)))
+  (list (filter pred lst) (filter (complement pred) lst)))
 
 (define (frequencies lst)
   (reduce
@@ -201,52 +163,40 @@
 
 (define (sort-by key lst)   [lst sortBy: key])
 (define (sum-by key lst)    (sum (map key lst)))
-
 (define (max-by key lst)
-  (reduce { |best x| (if (> (key x) (key best)) x best) }
-    (car lst) (cdr lst)))
-
+  (reduce { |best x| (if (> (key x) (key best)) x best) } (car lst) (cdr lst)))
 (define (min-by key lst)
-  (reduce { |best x| (if (< (key x) (key best)) x best) }
-    (car lst) (cdr lst)))
+  (reduce { |best x| (if (< (key x) (key best)) x best) } (car lst) (cdr lst)))
 
 (define (chunk-by n lst)
-  (if (or (empty? lst) (<= n 0))
+  (if (if (empty? lst) true (<= n 0))
     (list)
     (cons (take n lst) (chunk-by n (drop n lst)))))
 
 (define (iterate f x n)
-  (if (<= n 0)
-    (list)
-    (cons x (iterate f (f x) (- n 1)))))
+  (if (<= n 0) (list) (cons x (iterate f (f x) (- n 1)))))
 
 (define (index-of pred lst)
   (define (go lst i)
-    (cond
-      ((empty? lst) -1)
-      ((pred (car lst)) i)
-      (else (go (cdr lst) (+ i 1)))))
+    (if (empty? lst) -1
+      (if (pred (car lst)) i
+        (go (cdr lst) (+ i 1)))))
   (go lst 0))
 
-(define (flat-map f lst)
-  (flatten (map f lst)))
+(define (flat-map f lst) (flatten (map f lst)))
 
 ;; ── String Utilities ──────────────────────────────────────────────
 
 (define (string-empty? s) (= [s length] 0))
+(define (string-join sep lst) (if (empty? lst) "" [lst join: sep]))
+(define (words s) (filter (complement string-empty?) [[s trim] split: " "]))
+(define (lines s) [s split: "\n"])
 
-(define (string-join sep lst)
-  (if (empty? lst) "" [lst join: sep]))
-
-(define (words s)
-  (filter (complement string-empty?) [[s trim] split: " "]))
-
-(define (lines s)
-  [s split: "\n"])
+(define (string-concat . strs)
+  (reduce { |acc s| [acc concat: (to-string s)] } "" strs))
 
 (define (string-repeat s n)
-  (if (<= n 0) ""
-    (string-concat s (string-repeat s (- n 1)))))
+  (if (<= n 0) "" (string-concat s (string-repeat s (- n 1)))))
 
 ;; ── Memoize ───────────────────────────────────────────────────────
 
@@ -268,47 +218,22 @@
 
 ;; ── Option Helpers ────────────────────────────────────────────────
 
-(define (some? x)
-  (match x ((Some _) true) (_ false)))
-
-(define (unwrap opt default)
-  (match opt ((Some v) v) (_ default)))
-
-(define (option-map f opt)
-  (match opt ((Some v) (Some (f v))) (_ None)))
-
-(define (option-flat-map f opt)
-  (match opt ((Some v) (f v)) (_ None)))
-
+(define (some? x) (match x ((Some _) true) (_ false)))
+(define (unwrap opt default) (match opt ((Some v) v) (_ default)))
+(define (option-map f opt) (match opt ((Some v) (Some (f v))) (_ None)))
+(define (option-flat-map f opt) (match opt ((Some v) (f v)) (_ None)))
 (define (option-filter pred opt)
-  (match opt
-    ((Some v) (if (pred v) opt None))
-    (_ None)))
+  (match opt ((Some v) (if (pred v) opt None)) (_ None)))
 
 ;; ── Result Helpers ────────────────────────────────────────────────
 
-(define (ok? x)
-  (match x ((Ok _) true) (_ false)))
-
-(define (err? x)
-  (match x ((Err _) true) (_ false)))
-
-(define (unwrap-ok res default)
-  (match res ((Ok v) v) (_ default)))
-
-(define (unwrap-err res default)
-  (match res ((Err e) e) (_ default)))
-
-(define (result-map f res)
-  (match res ((Ok v) (Ok (f v))) ((Err e) (Err e))))
-
-(define (result-flat-map f res)
-  (match res ((Ok v) (f v)) ((Err e) (Err e))))
-
-(define (try-call f . args)
-  (try
-    (Ok (apply f args))
-    (catch e (Err e))))
+(define (ok? x)  (match x ((Ok _) true) (_ false)))
+(define (err? x) (match x ((Err _) true) (_ false)))
+(define (unwrap-ok res default) (match res ((Ok v) v) (_ default)))
+(define (unwrap-err res default) (match res ((Err e) e) (_ default)))
+(define (result-map f res) (match res ((Ok v) (Ok (f v))) ((Err e) (Err e))))
+(define (result-flat-map f res) (match res ((Ok v) (f v)) ((Err e) (Err e))))
+(define (try-call f . args) (try (Ok (apply f args)) (catch e (Err e))))
 
 ;; ── Pair Helpers ──────────────────────────────────────────────────
 
@@ -326,11 +251,8 @@
 
 ;; ── Macros ────────────────────────────────────────────────────────
 
-(defmacro unless (cond body)
-  `(if (not ,cond) ,body nil))
-
-(defmacro when (cond body)
-  `(if ,cond ,body nil))
+(defmacro unless (cond body) `(if (not ,cond) ,body nil))
+(defmacro when (cond body) `(if ,cond ,body nil))
 
 ;; ── Built-in Type Extensions (methods written in Moof) ────────────
 
