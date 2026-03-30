@@ -1,0 +1,12 @@
+[package]
+name = "moof"
+version = "0.3.0"
+edition = "2024"
+description = "Moof — a Lisp with Smalltalk-style message passing"
+
+[dependencies]
+rustyline = "15"
+
+[profile.release]
+opt-level = 3
+lto = true

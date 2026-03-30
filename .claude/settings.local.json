@@ -5,7 +5,15 @@
       "Bash(MOOF_DEBUG=1 ruby -e 'require_relative \"lib/moof\"; Moof.evaluate\\(\"\\(identity 1\\)\"\\)' 2>&1)",
       "Bash(git init:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git mv:*)",
+      "Bash(cargo init:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(./target/release/moof -e '\\(+ 1 2\\)' 2>&1)",
+      "Bash(./target/release/moof -e '\\(print \"Hello from Rust Moof!\"\\)' 2>&1)",
+      "Read(//Users/shreyan.jain27/Stuff/moof/**)",
+      "Bash(time ./target/release/moof -e '\\(do \\(define \\(fib n\\) \\(if \\(< n 2\\) n \\(+ \\(fib \\(- n 1\\)\\) \\(fib \\(- n 2\\)\\)\\)\\)\\) \\(fib 30\\)\\)')"
     ]
   }
 }
