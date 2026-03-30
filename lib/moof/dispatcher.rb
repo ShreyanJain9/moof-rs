@@ -55,6 +55,105 @@ module Moof
       end
     end
 
+    # ── Levenshtein distance (simple DP) ──────────────────────────
+
+    def levenshtein(a, b)
+      n = a.length
+      m = b.length
+      return m if n == 0
+      return n if m == 0
+
+      d = Array.new(n + 1) { |i| i }
+      (1..m).each do |j|
+        prev = d[0]
+        d[0] = j
+        (1..n).each do |i|
+          cost = a[i - 1] == b[j - 1] ? 0 : 1
+          temp = d[i]
+          d[i] = [d[i] + 1, d[i - 1] + 1, prev + cost].min
+          prev = temp
+        end
+      end
+      d[n]
+    end
+
+    # ── Collect known selectors for a receiver ────────────────────
+
+    def collect_known_selectors(receiver)
+      selectors = []
+
+      case receiver
+      when Integer, Float
+        selectors.concat(%w[abs to_s to_f to_i zero? positive? negative? nil? class sqrt pow: max: min: + - * / % > < >= <=])
+      when String
+        selectors.concat(%w[length uppercase lowercase reverse to_s to_i to_f chars trim nil? class at: contains: startsWith: endsWith: replaceAll:with: split: concat: slice:length:])
+      when Array
+        selectors.concat(%w[length first last rest reverse sort uniq flatten empty? to_s nil? class at: push: prepend: contains: join: indexOf: take: drop: zip: map: filter: reduce:init: each: any: all: none: sortBy:])
+      when Hash
+        selectors.concat(%w[keys values length empty? to_s nil? class at: put:value: remove: contains: merge:])
+      when Moof::Function
+        selectors.concat(%w[call: arity nil? class])
+      when Moof::MoofObject
+        klass = receiver.klass
+        k = klass
+        while k
+          selectors.concat(k.method_table.keys)
+          k = k.superclass
+        end
+        selectors.concat(receiver.fields.keys)
+        selectors.concat(%w[class className methods respondsTo: nil? to_s set:to:])
+      when Moof::MoofClass
+        selectors.concat(%w[name fields methods nil? class])
+      when true, false
+        selectors.concat(%w[not to_s nil? class and: or:])
+      when nil
+        selectors.concat(%w[nil? to_s class])
+      end
+
+      # Also check user-defined class extensions
+      class_name = builtin_class_name(receiver)
+      if class_name && @interpreter
+        klass = @interpreter.class_registry[class_name]
+        selectors.concat(klass.method_table.keys) if klass
+      end
+
+      selectors.uniq
+    end
+
+    # ── Suggest closest selector ──────────────────────────────────
+
+    def suggest_selector(receiver, failed_selector)
+      known = collect_known_selectors(receiver)
+      return nil if known.empty?
+
+      best = nil
+      best_dist = Float::INFINITY
+
+      known.each do |sel|
+        dist = levenshtein(failed_selector, sel)
+        if dist < best_dist
+          best_dist = dist
+          best = sel
+        end
+      end
+
+      # Only suggest if reasonably close (distance <= 3 and < half the selector length)
+      max_dist = [3, (failed_selector.length / 2.0).ceil].min
+      max_dist = 1 if failed_selector.length <= 2
+      best_dist <= max_dist ? best : nil
+    end
+
+    # ── Raise with suggestion ─────────────────────────────────────
+
+    def raise_message_error(receiver, receiver_desc, selector)
+      suggestion = suggest_selector(receiver, selector)
+      if suggestion
+        raise Moof::RuntimeError, "#{receiver_desc} does not respond to '#{selector}'\n  Did you mean: #{suggestion}?"
+      else
+        raise Moof::MessageError.new(receiver_desc, selector)
+      end
+    end
+
     def dispatch_number(receiver, selector, args)
       case selector
       when "abs"       then receiver.abs
@@ -81,7 +180,9 @@ module Moof
       when "pow:" then check_args!(receiver, selector, args, 1); receiver ** args[0]
       when "max:" then check_args!(receiver, selector, args, 1); receiver >= args[0] ? receiver : args[0]
       when "min:" then check_args!(receiver, selector, args, 1); receiver <= args[0] ? receiver : args[0]
-      else raise Moof::MessageError.new(receiver.class, selector)
+      else
+        desc = receiver.is_a?(Integer) ? "Integer" : "Float"
+        raise_message_error(receiver, desc, selector)
       end
     end
 
@@ -114,7 +215,7 @@ module Moof
         check_args!(receiver, selector, args, 1); receiver + args[0].to_s
       when "slice:length:"
         check_args!(receiver, selector, args, 2); receiver[args[0], args[1]]
-      else raise Moof::MessageError.new(receiver.class, selector)
+      else raise_message_error(receiver, "String", selector)
       end
     end
 
@@ -175,7 +276,7 @@ module Moof
       when "sortBy:"
         check_args!(receiver, selector, args, 1)
         receiver.sort_by { |el| call_func(args[0], interpreter, [el]) }
-      else raise Moof::MessageError.new(receiver.class, selector)
+      else raise_message_error(receiver, "List", selector)
       end
     end
 
@@ -198,7 +299,7 @@ module Moof
         check_args!(receiver, selector, args, 1); receiver.key?(args[0])
       when "merge:"
         check_args!(receiver, selector, args, 1); receiver.merge(args[0])
-      else raise Moof::MessageError.new(receiver.class, selector)
+      else raise_message_error(receiver, "Map", selector)
       end
     end
 
@@ -208,7 +309,7 @@ module Moof
       when "nil?"   then false
       when "class"  then "Function"
       when "arity"  then receiver.arity
-      else raise Moof::MessageError.new("Function", selector)
+      else raise_message_error(receiver, "Function", selector)
       end
     end
 
@@ -238,7 +339,7 @@ module Moof
         method = klass.lookup(selector)
         if method.nil?
           return receiver.get_field(selector) if receiver.fields.key?(selector)
-          raise Moof::MessageError.new(klass.name, selector)
+          raise_message_error(receiver, klass.name, selector)
         end
         invoke_method(method, receiver, args, interpreter)
       end
@@ -251,7 +352,7 @@ module Moof
       when "methods" then receiver.method_table.keys
       when "nil?"    then false
       when "class"   then "Class"
-      else raise Moof::MessageError.new("Class(#{receiver.name})", selector)
+      else raise_message_error(receiver, "Class(#{receiver.name})", selector)
       end
     end
 
@@ -265,7 +366,7 @@ module Moof
         check_args!(receiver, selector, args, 1); receiver && args[0]
       when "or:"
         check_args!(receiver, selector, args, 1); receiver || args[0]
-      else raise Moof::MessageError.new(receiver.class, selector)
+      else raise_message_error(receiver, receiver.class.to_s, selector)
       end
     end
 
@@ -274,14 +375,14 @@ module Moof
       when "nil?"  then true
       when "to_s"  then "nil"
       when "class" then "Nil"
-      else raise Moof::MessageError.new("nil", selector)
+      else raise_message_error(nil, "nil", selector)
       end
     end
 
     def dispatch_universal(receiver, selector, args)
       case selector
       when "nil?" then false
-      else raise Moof::MessageError.new(receiver.class, selector)
+      else raise_message_error(receiver, receiver.class.to_s, selector)
       end
     end
 

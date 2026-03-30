@@ -1,0 +1,12 @@
+(define (safe-div a b)
+  (if (= b 0)
+    (Err "division by zero")
+    (Ok (/ a b))))
+
+(define (show-result res)
+  (match res
+    ((Ok v) (print (format "Result: ~a" v)))
+    ((Err e) (print (format "Error: ~a" e)))))
+
+(show-result (safe-div 10 3))
+(show-result (safe-div 10 0))

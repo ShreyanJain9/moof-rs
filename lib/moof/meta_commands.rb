@@ -11,6 +11,7 @@ module Moof
       "time"    => "Evaluate an expression and show elapsed time",
       "classes" => "List all defined classes",
       "traits"  => "List all defined traits",
+      "protocols" => "List all defined protocols",
       "clear"   => "Clear the screen",
       "reset"   => "Reset the interpreter to a fresh state",
       "version" => "Print the Moof version",
@@ -38,8 +39,9 @@ module Moof
       when "doc"     then show_doc(arg)
       when "methods" then show_methods(arg)
       when "time"    then time_expr(arg)
-      when "classes" then list_classes
-      when "traits"  then list_traits
+      when "classes"   then list_classes
+      when "traits"    then list_traits
+      when "protocols" then list_protocols
       when "clear"   then clear_screen
       when "reset"   then reset_interpreter
       when "quit", "exit"
@@ -312,6 +314,16 @@ module Moof
         return
       end
 
+      # Check if it's a protocol
+      if interp.respond_to?(:protocol_registry)
+        protocol = interp.protocol_registry[name]
+        if protocol
+          puts Printer::Colors.magenta("protocol #{protocol.name}")
+          puts "  selectors: #{protocol.selectors.map { |s| Printer::Colors.cyan(s) }.join(", ")}"
+          return
+        end
+      end
+
       # Check if it's a trait
       trait = interp.trait_registry[name]
       if trait
@@ -518,6 +530,40 @@ module Moof
       unless unextended.empty?
         names = unextended.keys.sort.join(", ")
         puts Printer::Colors.dim("Built-in (not extended): #{names}")
+      end
+
+      # Show ADT types from type_registry if available
+      if interp.respond_to?(:type_registry) && !interp.type_registry.empty?
+        puts
+        puts Printer::Colors.bold("ADT Types:")
+        interp.type_registry.each do |name, variants|
+          variant_strs = if variants.is_a?(Hash)
+            variants.map do |vname, vfields|
+              if vfields.nil? || (vfields.respond_to?(:empty?) && vfields.empty?)
+                vname
+              else
+                "(#{vname} #{Array(vfields).join(" ")})"
+              end
+            end
+          elsif variants.is_a?(Array)
+            variants.map(&:to_s)
+          else
+            [variants.to_s]
+          end
+          puts "  #{Printer::Colors.class_hl(name)} = #{variant_strs.join(" | ")}"
+        end
+      end
+    end
+
+    def list_protocols
+      if !interp.respond_to?(:protocol_registry) || interp.protocol_registry.empty?
+        puts Printer::Colors.dim("(no protocols defined)")
+        return
+      end
+
+      interp.protocol_registry.each do |name, protocol|
+        selectors = protocol.selectors.join(", ")
+        puts "  #{Printer::Colors.magenta(name)} #{Printer::Colors.dim("(#{selectors})")}"
       end
     end
 

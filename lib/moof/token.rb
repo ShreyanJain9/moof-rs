@@ -26,6 +26,15 @@ module Moof
 
     QUOTE     = :QUOTE       # '
     DOT       = :DOT         # . (rest parameter separator)
+
+    # New tokens
+    PIPE          = :PIPE          # |
+    BACKTICK      = :BACKTICK      # `
+    COMMA         = :COMMA         # ,
+    COMMA_AT      = :COMMA_AT      # ,@
+    AMPERSAND     = :AMPERSAND     # &
+    INTERP_STRING = :INTERP_STRING # $"..."
+
     EOF       = :EOF
   end
 end

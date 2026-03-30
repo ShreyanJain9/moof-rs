@@ -106,10 +106,34 @@ module Moof
       when @scanner.scan(/'/)
         make_token(QUOTE, "'", nil, line, col)
 
+      # Backtick (quasiquote)
+      when @scanner.scan(/`/)
+        make_token(BACKTICK, "`", nil, line, col)
+
+      # Comma-at (unquote-splice) — must check before plain comma
+      when @scanner.scan(/,@/)
+        make_token(COMMA_AT, ",@", nil, line, col)
+
+      # Comma (unquote)
+      when @scanner.scan(/,/)
+        make_token(COMMA, ",", nil, line, col)
+
+      # Ampersand (selector ref)
+      when @scanner.scan(/&/)
+        make_token(AMPERSAND, "&", nil, line, col)
+
+      # Pipe
+      when @scanner.scan(/\|/)
+        make_token(PIPE, "|", nil, line, col)
+
       # Dot (rest parameter separator) — only if not followed by digit (which would be a float)
       when @scanner.check(/\.(?![0-9])/)
         @scanner.skip(/\./)
         make_token(DOT, ".", nil, line, col)
+
+      # Interpolated string $"..."
+      when @scanner.check(/\$"/)
+        scan_interp_string(line, col)
 
       # String literal
       when @scanner.check(/"/)
@@ -207,6 +231,77 @@ module Moof
 
       lexeme = @source[lexeme_start..(@scanner.pos - 1)]
       make_token(STRING, lexeme, value, line, col)
+    end
+
+    # Scan interpolated string: $"text \(expr) text"
+    # Produces INTERP_STRING token with literal = array of [:str, text] / [:expr, source]
+    def scan_interp_string(line, col)
+      @scanner.skip(/\$"/)
+      segments = []
+      current_text = +""
+
+      loop do
+        if @scanner.eos?
+          raise Moof::SyntaxError.new("Unterminated interpolated string", line: line, column: col)
+        end
+
+        # End of string
+        if @scanner.check(/"/)
+          @scanner.skip(/"/)
+          segments << [:str, current_text] unless current_text.empty?
+          break
+        end
+
+        # Interpolation: \( ... )
+        if @scanner.check(/\\\(/)
+          segments << [:str, current_text] unless current_text.empty?
+          current_text = +""
+          @scanner.skip(/\\\(/)
+
+          # Read until matching closing paren, tracking nesting
+          depth = 1
+          expr_source = +""
+          while depth > 0
+            if @scanner.eos?
+              raise Moof::SyntaxError.new("Unterminated interpolation in string", line: line, column: col)
+            end
+            if @scanner.check(/\(/)
+              depth += 1
+              expr_source << @scanner.getch
+            elsif @scanner.check(/\)/)
+              depth -= 1
+              if depth > 0
+                expr_source << @scanner.getch
+              else
+                @scanner.skip(/\)/)
+              end
+            elsif @scanner.scan(/\n/)
+              @line += 1
+              @line_start = @scanner.pos
+              expr_source << "\n"
+            else
+              expr_source << @scanner.getch
+            end
+          end
+
+          segments << [:expr, expr_source]
+          next
+        end
+
+        # Escape sequences (same as regular strings, but \( is interpolation)
+        if @scanner.scan(/\\(.)/)
+          ch = @scanner[1]
+          current_text << (ESCAPE_MAP[ch] || ch)
+        elsif @scanner.scan(/\n/)
+          @line += 1
+          @line_start = @scanner.pos
+          current_text << "\n"
+        else
+          current_text << @scanner.getch
+        end
+      end
+
+      make_token(INTERP_STRING, "$\"...\"", segments, line, col)
     end
 
     def make_token(type, lexeme, literal, line, col)

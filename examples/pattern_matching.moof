@@ -1,0 +1,13 @@
+(type Shape
+  (Circle radius)
+  (Rect width height)
+  (Triangle base height))
+
+(define (area shape)
+  (match shape
+    ((Circle r) (* pi (* r r)))
+    ((Rect w h) (* w h))
+    ((Triangle b h) (* 0.5 (* b h)))))
+
+(define shapes (list (Circle 5) (Rect 3 4) (Triangle 6 8)))
+(for-each { |s| (print (format "Area: ~a" (area s))) } shapes)

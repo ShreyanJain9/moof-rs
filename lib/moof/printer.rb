@@ -64,6 +64,12 @@ module Moof
       when Moof::MoofClass
         s = "#<Class #{value.name}>"
         color ? Colors.class_hl(s) : s
+      when Moof::Protocol
+        s = "#<Protocol #{value.name} [#{value.selectors.join(" ")}]>"
+        color ? Colors.magenta(s) : s
+      when Moof::TailCall
+        s = "#<TailCall>"
+        color ? Colors.dim(s) : s
       else
         value.to_s
       end
@@ -120,8 +126,8 @@ module Moof
     def self.format_object(obj, color:, indent:, max_depth:)
       klass = obj.klass
       name = color ? Colors.class_hl(klass.name) : klass.name
-      if klass.fields.empty?
-        "(#{name})"
+      if obj.fields.empty?
+        name
       elsif klass.own_fields.length <= 3
         pairs = obj.fields.map do |k, v|
           key = color ? Colors.dim("#{k}:") : "#{k}:"
@@ -157,6 +163,8 @@ module Moof
         value.name ? "Function" : "Lambda"
       when Moof::MoofObject   then value.klass.name
       when Moof::MoofClass    then "Class"
+      when Moof::Protocol     then "Protocol"
+      when Moof::TailCall     then "TailCall"
       else value.class.name
       end
     end

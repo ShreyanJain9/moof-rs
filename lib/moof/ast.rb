@@ -81,5 +81,55 @@ module Moof
 
     # (trait Name (method ...))
     TraitDef = node(:name, :methods)
+
+    # ============ New AST nodes ============
+
+    # -- Pattern Matching --
+    # (match expr clauses...)
+    Match = node(:expr, :clauses)  # clauses: Array of MatchClause
+
+    # Each clause in a match expression
+    MatchClause = node(:pattern, :guard, :body)  # guard is nil if no when
+
+    # Pattern nodes
+    MatchWildcard    = node()                        # _ pattern
+    MatchBind        = node(:name)                   # bind a name
+    MatchList        = node(:elements, :rest)         # (elem1 elem2 . rest)
+    MatchMap         = node(:pairs)                   # {key: pattern ...}
+    MatchConstructor = node(:class_name, :bindings)   # (Point x y)
+
+    # -- Algebraic Data Types --
+    # (type Option (Some value) None)
+    TypeDef     = node(:name, :variants)  # variants: Array of TypeVariant
+    TypeVariant = node(:name, :fields)    # fields: Array of String
+
+    # -- Pipeline --
+    # (-> value step1 step2 step3)
+    Pipeline = node(:value, :steps)
+
+    # -- Quasiquote / Unquote --
+    Quasiquote  = node(:expression)
+    Unquote     = node(:expression)
+    UnquoteSplice = node(:expression)  # ,@
+
+    # -- String Interpolation --
+    # $"hello \(name)"
+    StringInterp = node(:segments)  # Array of AST nodes (StringLiteral for text, any for exprs)
+
+    # -- Protocol Definitions --
+    # (protocol Measurable area perimeter)
+    ProtocolDef = node(:name, :selectors)  # selectors: Array of String
+
+    # -- First-Class Selector --
+    # &name or &(keyword: arg ...)
+    SelectorRef = node(:selector, :partial_args)
+
+    # -- Keyword Arguments --
+    # port: 443 inside a call
+    KeywordArg = node(:keyword, :value)
+
+    # -- DefMacro --
+    # (defmacro name (params...) body)
+    DefMacro = node(:name, :params, :body)
   end
 end

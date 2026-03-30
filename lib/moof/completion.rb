@@ -4,12 +4,13 @@ module Moof
       true false nil
       define lambda if let do set! quote try catch cond and or
       class trait method fields extends uses
+      match type protocol extend defmacro when ->
     ].freeze
 
     META_COMMANDS = %w[
       ,help ,env ,ast ,load ,quit ,exit ,version
       ,type ,doc ,methods ,time ,classes ,traits
-      ,clear ,reset
+      ,clear ,reset ,protocols
     ].freeze
 
     SPECIAL_FORMS = %w[
@@ -42,6 +43,13 @@ module Moof
 
         # Keywords
         candidates.concat(KEYWORDS)
+
+        # New builtin functions
+        candidates.concat(%w[
+          implements? read-file write-file file-exists? read-lines
+          send type-of to-string read-line assert assert-equal
+          exit time string-concat
+        ])
 
         # Common message selectors (for [] context)
         candidates.concat(common_selectors)
