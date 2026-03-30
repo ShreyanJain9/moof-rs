@@ -1,0 +1,59 @@
+#!/usr/bin/env ruby
+require "optparse"
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+require "moof"
+
+eval_source = nil
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: moof [options] [file.moof]"
+
+  opts.on("-e", "--eval SOURCE", "Evaluate a string and print the result") do |src|
+    eval_source = src
+  end
+
+  opts.on("-v", "--version", "Print version") do
+    puts "Moof #{Moof::VERSION}"
+    exit 0
+  end
+
+  opts.on("-h", "--help", "Print this help") do
+    puts opts
+    exit 0
+  end
+end
+
+begin
+  parser.parse!
+rescue OptionParser::InvalidOption => e
+  $stderr.puts e.message
+  $stderr.puts parser
+  exit 1
+end
+
+begin
+  if eval_source
+    # moof -e '(+ 1 2)'
+    result = Moof.evaluate(eval_source, filename: "(eval)")
+    puts Moof::Printer.format(result) unless result.nil?
+  elsif ARGV.length > 0
+    # moof file.moof
+    filename = ARGV[0]
+    unless File.exist?(filename)
+      $stderr.puts "File not found: #{filename}"
+      exit 1
+    end
+    source = File.read(filename)
+    Moof.evaluate(source, filename: filename)
+  else
+    # moof — start the REPL
+    Moof.repl
+  end
+rescue Moof::MoofError => e
+  $stderr.puts "Error: #{e.message}"
+  exit 1
+rescue Interrupt
+  puts
+  exit 0
+end

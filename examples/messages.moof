@@ -1,0 +1,15 @@
+; Demonstrating Moof's message passing
+(define greeting "Hello, Moof!")
+(print [greeting length])
+(print [greeting uppercase])
+(print [greeting replaceAll: "Moof" with: "World"])
+
+; Messages on numbers
+(print [42 abs])
+(print [-7 abs])
+
+; Messages on lists
+(define nums (list 1 2 3 4 5))
+(print [nums length])
+(print [nums reverse])
+(print [nums first])

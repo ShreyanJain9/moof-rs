@@ -1,0 +1,188 @@
+;; Moof Standard Library — written in Moof itself
+
+;; ── Identity and Composition ────────────────────────────────────
+
+(define (identity x) x)
+
+(define (compose f g)
+  (lambda (x) (f (g x))))
+
+(define (flip f)
+  (lambda (a b) (f b a)))
+
+(define (constantly x)
+  (lambda (. args) x))
+
+(define (complement pred)
+  (lambda (x) (not (pred x))))
+
+;; ── Numeric Utilities ────────────────────────────────────────────
+
+(define (square x) (* x x))
+(define (cube x)   (* x x x))
+(define (sqrt x)   [x sqrt])
+
+(define (abs x)
+  (if (< x 0) (- x) x))
+
+(define (max a b)
+  (if (> a b) a b))
+
+(define (min a b)
+  (if (< a b) a b))
+
+(define (even? n) (= (% n 2) 0))
+(define (odd? n)  (not (even? n)))
+
+(define (between? n lo hi)
+  (and (>= n lo) (<= n hi)))
+
+(define (clamp n lo hi)
+  (max lo (min hi n)))
+
+(define (gcd a b)
+  (if (= b 0) a (gcd b (% a b))))
+
+(define (lcm a b)
+  (/ (* a b) (gcd a b)))
+
+(define (factorial n)
+  (if (<= n 1) 1 (* n (factorial (- n 1)))))
+
+(define (power base exp)
+  (cond
+    ((= exp 0) 1)
+    ((even? exp)
+     (let ((half (power base (/ exp 2))))
+       (* half half)))
+    (else (* base (power base (- exp 1))))))
+
+(define (sum lst)
+  (reduce + 0 lst))
+
+(define (product lst)
+  (reduce * 1 lst))
+
+;; ── List Utilities ───────────────────────────────────────────────
+
+(define (second lst) [lst at: 1])
+(define (third  lst) [lst at: 2])
+(define (fourth lst) [lst at: 3])
+
+(define (last lst)
+  [lst at: (- [lst length] 1)])
+
+(define (any? pred lst)
+  [lst any: pred])
+
+(define (all? pred lst)
+  [lst all: pred])
+
+(define (none? pred lst)
+  [lst none: pred])
+
+(define (find pred lst)
+  (cond
+    ((= [lst length] 0) nil)
+    ((pred (car lst)) (car lst))
+    (else (find pred (cdr lst)))))
+
+;; flatten, concat, reverse are builtins — no need to redefine
+
+(define (append . lists)
+  (reduce concat (list) lists))
+
+(define (zip-with f lst1 lst2)
+  (if (or (= [lst1 length] 0) (= [lst2 length] 0))
+    (list)
+    (cons (f (car lst1) (car lst2))
+          (zip-with f (cdr lst1) (cdr lst2)))))
+
+(define (repeat x n)
+  (if (<= n 0)
+    (list)
+    (cons x (repeat x (- n 1)))))
+
+(define (partition pred lst)
+  (list (filter pred lst)
+        (filter (complement pred) lst)))
+
+(define (frequencies lst)
+  (reduce
+    (lambda (counts x)
+      (let ((n ([counts at: x])))
+        [counts put: x value: (if (nil? n) 1 (+ n 1))]))
+    {}
+    lst))
+
+(define (sort-by key lst)
+  [lst sortBy: key])
+
+(define (sum-by key lst)
+  (sum (map key lst)))
+
+(define (max-by key lst)
+  (reduce (lambda (best x)
+    (if (> (key x) (key best)) x best))
+    (car lst)
+    (cdr lst)))
+
+(define (min-by key lst)
+  (reduce (lambda (best x)
+    (if (< (key x) (key best)) x best))
+    (car lst)
+    (cdr lst)))
+
+(define (chunk-by n lst)
+  (if (or (= [lst length] 0) (<= n 0))
+    (list)
+    (cons (take n lst) (chunk-by n (drop n lst)))))
+
+(define (iterate f x n)
+  (if (<= n 0)
+    (list)
+    (cons x (iterate f (f x) (- n 1)))))
+
+;; ── String Utilities ─────────────────────────────────────────────
+
+(define (string-empty? s)
+  (= [s length] 0))
+
+(define (string-join sep lst)
+  (if (= [lst length] 0)
+    ""
+    [lst join: sep]))
+
+(define (words s)
+  (filter (complement string-empty?) [[s trim] split: " "]))
+
+(define (lines s)
+  [s split: "\n"])
+
+;; ── Function Utilities ───────────────────────────────────────────
+
+(define (pipe . fns)
+  (lambda (x)
+    (reduce (lambda (acc f) (f acc)) x fns)))
+
+(define (juxt . fns)
+  (lambda (x)
+    (map (lambda (f) (f x)) fns)))
+
+(define (memoize f)
+  (let ((cache {}))
+    (lambda (x)
+      (let ((cached ([cache at: x])))
+        (if (not (nil? cached))
+          cached
+          (let ((result (f x)))
+            (set! cache [cache put: x value: result])
+            result))))))
+
+;; ── Math Constants ───────────────────────────────────────────────
+
+(define pi 3.141592653589793)
+(define e  2.718281828459045)
+
+(define (degrees->radians d) (* d (/ pi 180)))
+(define (radians->degrees r) (* r (/ 180 pi)))
