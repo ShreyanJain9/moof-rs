@@ -131,5 +131,15 @@ module Moof
     # -- DefMacro --
     # (defmacro name (params...) body)
     DefMacro = node(:name, :params, :body)
+
+    # -- Module System --
+    # (module name (export ...) body...)
+    ModuleDef = node(:name, :exports, :body)  # exports: Array of String, body: Array of nodes
+
+    # (use module-name) / (use module-name (name1 name2)) / (use module-name :as alias)
+    UseModule = node(:module_name, :imports, :alias_name)  # imports: nil=all, Array=selective; alias_name: nil or String
+
+    # (require "path/to/file")
+    Require = node(:path)
   end
 end

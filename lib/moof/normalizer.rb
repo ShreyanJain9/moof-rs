@@ -132,6 +132,13 @@ module Moof
       when AST::UnquoteSplice
         AST::UnquoteSplice.new(expression: normalize(node.expression), line: node.line, column: node.column)
 
+      when AST::ModuleDef
+        AST::ModuleDef.new(name: node.name, exports: node.exports,
+          body: node.body.map { |e| normalize(e) }, line: node.line, column: node.column)
+
+      when AST::UseModule, AST::Require
+        node
+
       else
         node
       end

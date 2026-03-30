@@ -1,12 +1,10 @@
 require "minitest/autorun"
-require_relative "../lib/moof/errors"
-require_relative "../lib/moof/token"
-require_relative "../lib/moof/ast"
-require_relative "../lib/moof/interpreter"
+require_relative "../lib/moof"
 
 class InterpreterTest < Minitest::Test
   def setup
     @interp = Moof::Interpreter.new
+    Moof.load_stdlib(@interp)
   end
 
   def eval_program(*exprs)

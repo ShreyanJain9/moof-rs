@@ -1,6 +1,87 @@
-;; Moof Standard Library — written in Moof itself
+;; ═══════════════════════════════════════════════════════════════════════
+;; Moof Standard Library — self-hosting core
+;;
+;; This file IS the language. Everything here is written in Moof itself,
+;; running on top of a minimal set of Ruby primitives:
+;;
+;;   Arithmetic:  + - * / %
+;;   Comparison:  > < >= <=
+;;   Equality:    = eq?
+;;   Data:        list cons car cdr
+;;   I/O:         print display format read-line read-file write-file
+;;                file-exists? read-lines
+;;   Dispatch:    __send apply
+;;   Control:     error exit
+;;   Introspect:  type-of implements? range time
+;;
+;; Everything else is defined HERE.
+;; ═══════════════════════════════════════════════════════════════════════
 
-;; ── Identity and Composition ────────────────────────────────────
+
+;; ── Core Logic ─────────────────────────────────────────────────────
+
+(define (not x)
+  (if x false true))
+
+;; ── Core List Operations (wrappers around [] messages) ─────────────
+
+(define (length x)    [x length])
+(define (reverse lst) [lst reverse])
+(define (sort lst)    [lst sort])
+(define (flatten lst) [lst flatten])
+(define (empty? x)    [x empty?])
+(define (first lst)   [lst first])
+(define (last lst)    [lst last])
+
+(define (map f lst)       [lst map: f])
+(define (filter pred lst) [lst filter: pred])
+(define (reduce f init lst) [lst reduce: f init: init])
+(define (for-each f lst)  [lst each: f])
+
+(define (take n lst)   [lst take: n])
+(define (drop n lst)   [lst drop: n])
+(define (concat a b)   (if (string? a) [a concat: b] (apply list (append a b))))
+(define (zip a b)      [a zip: b])
+(define (nth i lst)    [lst at: i])
+
+;; ── Type Checks (built on type-of) ────────────────────────────────
+
+(define (number?   x) (let ((t (type-of x))) (or (= t "Integer") (= t "Float"))))
+(define (integer?  x) (= (type-of x) "Integer"))
+(define (float?    x) (= (type-of x) "Float"))
+(define (string?   x) (= (type-of x) "String"))
+(define (list?     x) (= (type-of x) "List"))
+(define (nil?      x) (= (type-of x) "Nil"))
+(define (bool?     x) (= (type-of x) "Bool"))
+(define (function? x) (= (type-of x) "Function"))
+(define (hash?     x) (= (type-of x) "Map"))
+(define (symbol?   x) (= (type-of x) "Symbol"))
+(define (class?    x) (= (type-of x) "Class"))
+(define (protocol? x) (= (type-of x) "Protocol"))
+
+;; ── Dynamic Message Send ──────────────────────────────────────────
+
+(define (send receiver selector . args)
+  (apply __send (cons receiver (cons selector args))))
+
+(define (to-string x) [x to_s])
+
+;; ── Assertion (pure Moof) ─────────────────────────────────────────
+
+(define (assert condition)
+  (if condition true (error "Assertion failed")))
+
+(define (assert-equal expected actual)
+  (if (= expected actual)
+    true
+    (error (format "Assertion failed: expected ~a, got ~a" expected actual))))
+
+;; ── String Operations ─────────────────────────────────────────────
+
+(define (string-concat . strs)
+  (reduce { |acc s| [acc concat: (to-string s)] } "" strs))
+
+;; ── Identity and Composition ──────────────────────────────────────
 
 (define (identity x) x)
 
@@ -16,23 +97,28 @@
 (define (complement pred)
   (lambda (x) (not (pred x))))
 
-;; ── Numeric Utilities ────────────────────────────────────────────
+(define (pipe . fns)
+  (lambda (x)
+    (reduce { |acc f| (f acc) } x fns)))
+
+(define (juxt . fns)
+  (lambda (x)
+    (map { |f| (f x) } fns)))
+
+(define (partial f . bound)
+  (lambda (. args)
+    (apply f (append bound args))))
+
+;; ── Numeric Utilities ─────────────────────────────────────────────
 
 (define (square x) (* x x))
 (define (cube x)   (* x x x))
-(define (sqrt x)   [x sqrt])
+(define (abs x)    (if (< x 0) (- x) x))
+(define (max a b)  (if (> a b) a b))
+(define (min a b)  (if (< a b) a b))
 
-(define (abs x)
-  (if (< x 0) (- x) x))
-
-(define (max a b)
-  (if (> a b) a b))
-
-(define (min a b)
-  (if (< a b) a b))
-
-(define (even? n) (= (% n 2) 0))
-(define (odd? n)  (not (even? n)))
+(define (even? n)  (= (% n 2) 0))
+(define (odd? n)   (not (even? n)))
 
 (define (between? n lo hi)
   (and (>= n lo) (<= n hi)))
@@ -57,50 +143,48 @@
        (* half half)))
     (else (* base (power base (- exp 1))))))
 
-(define (sum lst)
-  (reduce + 0 lst))
+(define (sum lst)     (reduce + 0 lst))
+(define (product lst) (reduce * 1 lst))
 
-(define (product lst)
-  (reduce * 1 lst))
+;; ── Math Constants ────────────────────────────────────────────────
 
-;; ── List Utilities ───────────────────────────────────────────────
+(define pi 3.141592653589793)
+(define e  2.718281828459045)
+
+(define (degrees->radians d) (* d (/ pi 180)))
+(define (radians->degrees r) (* r (/ 180 pi)))
+
+;; ── List Utilities ────────────────────────────────────────────────
 
 (define (second lst) [lst at: 1])
 (define (third  lst) [lst at: 2])
 (define (fourth lst) [lst at: 3])
 
-(define (last lst)
-  [lst at: (- [lst length] 1)])
-
-(define (any? pred lst)
-  [lst any: pred])
-
-(define (all? pred lst)
-  [lst all: pred])
-
-(define (none? pred lst)
-  [lst none: pred])
+(define (any? pred lst)  [lst any: pred])
+(define (all? pred lst)  [lst all: pred])
+(define (none? pred lst) [lst none: pred])
 
 (define (find pred lst)
   (cond
-    ((= [lst length] 0) nil)
+    ((empty? lst) nil)
     ((pred (car lst)) (car lst))
     (else (find pred (cdr lst)))))
 
-;; flatten, concat, reverse are builtins — no need to redefine
-
 (define (append . lists)
-  (reduce concat (list) lists))
+  (reduce { |acc lst|
+    (reduce { |a x| (cons x a) }
+      acc
+      (reverse lst))
+  } (list) (reverse lists)))
 
 (define (zip-with f lst1 lst2)
-  (if (or (= [lst1 length] 0) (= [lst2 length] 0))
+  (if (or (empty? lst1) (empty? lst2))
     (list)
     (cons (f (car lst1) (car lst2))
           (zip-with f (cdr lst1) (cdr lst2)))))
 
 (define (repeat x n)
-  (if (<= n 0)
-    (list)
+  (if (<= n 0) (list)
     (cons x (repeat x (- n 1)))))
 
 (define (partition pred lst)
@@ -109,32 +193,25 @@
 
 (define (frequencies lst)
   (reduce
-    (lambda (counts x)
+    { |counts x|
       (let ((n ([counts at: x])))
-        [counts put: x value: (if (nil? n) 1 (+ n 1))]))
+        [counts put: x value: (if (nil? n) 1 (+ n 1))])}
     {}
     lst))
 
-(define (sort-by key lst)
-  [lst sortBy: key])
-
-(define (sum-by key lst)
-  (sum (map key lst)))
+(define (sort-by key lst)   [lst sortBy: key])
+(define (sum-by key lst)    (sum (map key lst)))
 
 (define (max-by key lst)
-  (reduce (lambda (best x)
-    (if (> (key x) (key best)) x best))
-    (car lst)
-    (cdr lst)))
+  (reduce { |best x| (if (> (key x) (key best)) x best) }
+    (car lst) (cdr lst)))
 
 (define (min-by key lst)
-  (reduce (lambda (best x)
-    (if (< (key x) (key best)) x best))
-    (car lst)
-    (cdr lst)))
+  (reduce { |best x| (if (< (key x) (key best)) x best) }
+    (car lst) (cdr lst)))
 
 (define (chunk-by n lst)
-  (if (or (= [lst length] 0) (<= n 0))
+  (if (or (empty? lst) (<= n 0))
     (list)
     (cons (take n lst) (chunk-by n (drop n lst)))))
 
@@ -143,15 +220,23 @@
     (list)
     (cons x (iterate f (f x) (- n 1)))))
 
-;; ── String Utilities ─────────────────────────────────────────────
+(define (index-of pred lst)
+  (define (go lst i)
+    (cond
+      ((empty? lst) -1)
+      ((pred (car lst)) i)
+      (else (go (cdr lst) (+ i 1)))))
+  (go lst 0))
 
-(define (string-empty? s)
-  (= [s length] 0))
+(define (flat-map f lst)
+  (flatten (map f lst)))
+
+;; ── String Utilities ──────────────────────────────────────────────
+
+(define (string-empty? s) (= [s length] 0))
 
 (define (string-join sep lst)
-  (if (= [lst length] 0)
-    ""
-    [lst join: sep]))
+  (if (empty? lst) "" [lst join: sep]))
 
 (define (words s)
   (filter (complement string-empty?) [[s trim] split: " "]))
@@ -159,15 +244,11 @@
 (define (lines s)
   [s split: "\n"])
 
-;; ── Function Utilities ───────────────────────────────────────────
+(define (string-repeat s n)
+  (if (<= n 0) ""
+    (string-concat s (string-repeat s (- n 1)))))
 
-(define (pipe . fns)
-  (lambda (x)
-    (reduce (lambda (acc f) (f acc)) x fns)))
-
-(define (juxt . fns)
-  (lambda (x)
-    (map (lambda (f) (f x)) fns)))
+;; ── Memoize ───────────────────────────────────────────────────────
 
 (define (memoize f)
   (let ((cache {}))
@@ -179,20 +260,13 @@
             (set! cache [cache put: x value: result])
             result))))))
 
-;; ── Math Constants ───────────────────────────────────────────────
-
-(define pi 3.141592653589793)
-(define e  2.718281828459045)
-
-(define (degrees->radians d) (* d (/ pi 180)))
-(define (radians->degrees r) (* r (/ 180 pi)))
-
-;; ── ADT Types ───────────────────────────────────────────────────
+;; ── ADT Types ─────────────────────────────────────────────────────
 
 (type Option (Some value) None)
 (type Result (Ok value) (Err reason))
+(type Pair   (Pair fst snd))
 
-;; ── Option Helpers ──────────────────────────────────────────────
+;; ── Option Helpers ────────────────────────────────────────────────
 
 (define (some? x)
   (match x ((Some _) true) (_ false)))
@@ -203,7 +277,15 @@
 (define (option-map f opt)
   (match opt ((Some v) (Some (f v))) (_ None)))
 
-;; ── Result Helpers ──────────────────────────────────────────────
+(define (option-flat-map f opt)
+  (match opt ((Some v) (f v)) (_ None)))
+
+(define (option-filter pred opt)
+  (match opt
+    ((Some v) (if (pred v) opt None))
+    (_ None)))
+
+;; ── Result Helpers ────────────────────────────────────────────────
 
 (define (ok? x)
   (match x ((Ok _) true) (_ false)))
@@ -214,18 +296,94 @@
 (define (unwrap-ok res default)
   (match res ((Ok v) v) (_ default)))
 
+(define (unwrap-err res default)
+  (match res ((Err e) e) (_ default)))
+
 (define (result-map f res)
   (match res ((Ok v) (Ok (f v))) ((Err e) (Err e))))
 
-;; ── Protocols ───────────────────────────────────────────────────
+(define (result-flat-map f res)
+  (match res ((Ok v) (f v)) ((Err e) (Err e))))
 
-(protocol Countable length)
-(protocol Iterable map: filter:)
+(define (try-call f . args)
+  (try
+    (Ok (apply f args))
+    (catch e (Err e))))
 
-;; ── Macros ──────────────────────────────────────────────────────
+;; ── Pair Helpers ──────────────────────────────────────────────────
+
+(define (fst p) (match p ((Pair a _) a)))
+(define (snd p) (match p ((Pair _ b) b)))
+(define (map-fst f p) (match p ((Pair a b) (Pair (f a) b))))
+(define (map-snd f p) (match p ((Pair a b) (Pair a (f b)))))
+
+;; ── Protocols ─────────────────────────────────────────────────────
+
+(protocol Countable  length)
+(protocol Iterable   map: filter: each:)
+(protocol Comparable >)
+(protocol Showable   to_s)
+
+;; ── Macros ────────────────────────────────────────────────────────
 
 (defmacro unless (cond body)
   `(if (not ,cond) ,body nil))
 
 (defmacro when (cond body)
   `(if ,cond ,body nil))
+
+;; ── Built-in Type Extensions (methods written in Moof) ────────────
+
+(class Integer
+  (method even? [] (= (% self 2) 0))
+  (method odd?  [] (not [self even?]))
+  (method times: [f] (for-each f (range self)))
+  (method to: [n] (range self (+ n 1)))
+  (method downto: [n]
+    (if (< self n) (list)
+      (cons self [(- self 1) downto: n]))))
+
+(class Float
+  (method round: [places]
+    (let ((factor (power 10 places)))
+      (/ (* self factor) factor)))
+  (method floor [] [self to_i])
+  (method ceil  [] (if (= self [self to_i]) [self to_i] (+ [self to_i] 1))))
+
+(class String
+  (method empty?    [] (= [self length] 0))
+  (method blank?    [] [self empty?])
+  (method words     [] (filter { |w| (not [w empty?]) } [[self trim] split: " "]))
+  (method lines     [] [self split: "\n"])
+  (method repeat:   [n] (string-repeat self n))
+  (method includes: [s] [self contains: s])
+  (method first:    [n] [self slice: 0 length: n])
+  (method last:     [n] [self slice: (- [self length] n) length: n]))
+
+(class List
+  (method sum       [] (reduce + 0 self))
+  (method product   [] (reduce * 1 self))
+  (method min       [] (reduce min (car self) (cdr self)))
+  (method max       [] (reduce max (car self) (cdr self)))
+  (method compact   [] (filter { |x| (not (nil? x)) } self))
+  (method enumerate [] [self zip: (range [self length])])
+  (method second    [] [self at: 1])
+  (method third     [] [self at: 2])
+  (method flat-map: [f] (flatten [self map: f]))
+  (method count:    [pred] [self length]))
+
+(class Map
+  (method each: [f]
+    (for-each { |k| (f k [self at: k]) } [self keys])
+    nil)
+  (method map-values: [f]
+    (reduce { |acc k| [acc put: k value: (f [self at: k])] }
+      {} [self keys]))
+  (method select: [pred]
+    (reduce { |acc k|
+      (if (pred k [self at: k])
+        [acc put: k value: [self at: k]]
+        acc)}
+      {} [self keys]))
+  (method reject: [pred]
+    [self select: { |k v| (not (pred k v)) }]))

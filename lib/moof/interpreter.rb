@@ -231,6 +231,15 @@ module Moof
         @trait_registry[node.name] = method_table
         method_table
 
+      when AST::ModuleDef
+        evaluate_module(node, env)
+
+      when AST::UseModule
+        import_module(node, env)
+
+      when AST::Require
+        require_file(node, env)
+
       else
         raise Moof::RuntimeError, "Unknown AST node type: #{node.class}"
       end
@@ -301,7 +310,77 @@ module Moof
       end
     end
 
+    attr_reader :module_registry
+
     private
+
+    def evaluate_module(node, env)
+      @module_registry ||= {}
+      mod_env = Environment.new(@global_env)  # modules see globals but get their own scope
+
+      # Evaluate all body expressions in the module env
+      node.body.each { |expr| evaluate_node(expr, mod_env) }
+
+      # Collect exports
+      exported = {}
+      if node.exports.empty?
+        # Export everything defined in the module
+        mod_env.bindings.each { |name, val| exported[name] = val }
+      else
+        node.exports.each do |name|
+          begin
+            exported[name] = mod_env.get(name)
+          rescue Moof::NameError
+            raise Moof::RuntimeError, "Module '#{node.name}' exports '#{name}' but it is not defined"
+          end
+        end
+      end
+
+      @module_registry[node.name] = exported
+      env.define(node.name, exported)  # module itself is available as a map-like value
+      exported
+    end
+
+    def import_module(node, env)
+      @module_registry ||= {}
+      mod = @module_registry[node.module_name]
+      raise Moof::RuntimeError, "Unknown module: #{node.module_name}" unless mod
+
+      if node.alias_name
+        # (use foo :as f) — define alias as a hash for qualified access
+        env.define(node.alias_name, mod)
+      elsif node.imports
+        # (use foo (bar baz)) — import specific names
+        node.imports.each do |name|
+          raise Moof::RuntimeError, "Module '#{node.module_name}' does not export '#{name}'" unless mod.key?(name)
+          env.define(name, mod[name])
+        end
+      else
+        # (use foo) — import all exports
+        mod.each { |name, val| env.define(name, val) }
+      end
+      nil
+    end
+
+    def require_file(node, env)
+      path = node.path
+      path += ".moof" unless path.end_with?(".moof")
+
+      # Search relative to the current working directory and the stdlib directory
+      full_path = if File.exist?(path)
+        path
+      elsif File.exist?(File.join(File.dirname(Moof::STDLIB_PATH), path))
+        File.join(File.dirname(Moof::STDLIB_PATH), path)
+      else
+        raise Moof::RuntimeError, "Cannot find file: #{path}"
+      end
+
+      source = File.read(full_path)
+      tokens = Lexer.new(source, filename: full_path).tokenize
+      program = Parser.new(tokens).parse_program
+      normalized = Normalizer.new.call(program)
+      evaluate(normalized)
+    end
 
     def evaluate_call_args(arguments, env)
       arguments.map do |arg|

@@ -119,6 +119,9 @@ module Moof
         when "protocol" then return parse_protocol(ln, col)
         when "extend"   then return parse_extend(ln, col)
         when "defmacro" then return parse_defmacro(ln, col)
+        when "module"   then return parse_module(ln, col)
+        when "use"      then return parse_use(ln, col)
+        when "require"  then return parse_require(ln, col)
         end
       end
 
@@ -788,6 +791,65 @@ module Moof
       exprs = []
       exprs << parse_expression until check(end_type)
       exprs.length == 1 ? exprs.first : AST::Do.new(expressions: exprs)
+    end
+
+    # (module name (export n1 n2 ...) body...)
+    def parse_module(ln, col)
+      advance # skip 'module'
+      name_tok = expect(IDENTIFIER, "Expected module name")
+      exports = []
+      body = []
+
+      # Check for (export ...) clause
+      if check(LPAREN)
+        # Peek to see if it's (export ...)
+        saved_pos = @pos
+        advance # skip (
+        if check(IDENTIFIER) && current.lexeme == "export"
+          advance # skip 'export'
+          exports << advance.lexeme while check(IDENTIFIER) || check(COLON_ID)
+          expect(RPAREN, "Expected ')' to close export list")
+        else
+          @pos = saved_pos # backtrack — it's body, not export
+        end
+      end
+
+      # Parse body expressions
+      body << parse_expression until check(RPAREN)
+      expect(RPAREN, "Expected ')' to close module")
+      AST::ModuleDef.new(name: name_tok.lexeme, exports: exports, body: body, line: ln, column: col)
+    end
+
+    # (use module-name) / (use module-name (name1 name2)) / (use module-name :as alias)
+    def parse_use(ln, col)
+      advance # skip 'use'
+      name_tok = expect(IDENTIFIER, "Expected module name")
+      imports = nil
+      alias_name = nil
+
+      unless check(RPAREN)
+        if check(COLON_ID) && current.lexeme == "as:"
+          advance # skip as:
+          alias_tok = expect(IDENTIFIER, "Expected alias name")
+          alias_name = alias_tok.lexeme
+        elsif check(LPAREN)
+          advance # skip (
+          imports = []
+          imports << advance.lexeme while check(IDENTIFIER) || check(COLON_ID)
+          expect(RPAREN, "Expected ')' to close import list")
+        end
+      end
+
+      expect(RPAREN, "Expected ')' to close use")
+      AST::UseModule.new(module_name: name_tok.lexeme, imports: imports, alias_name: alias_name, line: ln, column: col)
+    end
+
+    # (require "path/to/file")
+    def parse_require(ln, col)
+      advance # skip 'require'
+      path_tok = expect(STRING, "Expected file path string")
+      expect(RPAREN, "Expected ')' to close require")
+      AST::Require.new(path: path_tok.literal, line: ln, column: col)
     end
 
     def parse_params_until(end_type)
