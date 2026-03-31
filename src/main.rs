@@ -1,6 +1,4 @@
 use moof::interpreter::Interpreter;
-use moof::lexer::Lexer;
-use moof::parser::Parser;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const STDLIB: &str = include_str!("../stdlib/stdlib.moof");
@@ -58,7 +56,7 @@ fn run_source(source: &str, filename: &str, print_result: bool) {
             if print_result {
                 match result {
                     moof::value::Value::Nil => {} // don't print nil for -e
-                    val => println!("{}", val.inspect()),
+                    ref val => println!("{}", interp.inspect_value(val)),
                 }
             }
         }

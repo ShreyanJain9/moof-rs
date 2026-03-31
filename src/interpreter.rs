@@ -302,6 +302,43 @@ impl Interpreter {
         None
     }
 
+    /// Format a value with symbol name resolution.
+    pub fn display_value(&self, val: &Value) -> String {
+        match val {
+            Value::Symbol(id) => self.symbols.try_name(*id).unwrap_or("?").to_string(),
+            Value::Cons(_) => self.display_cons(val),
+            _ => format!("{}", val),
+        }
+    }
+
+    /// Format a value with symbol resolution, quoting strings.
+    pub fn inspect_value(&self, val: &Value) -> String {
+        match val {
+            Value::Str(s) => format!("{:?}", &**s),
+            Value::Symbol(id) => self.symbols.try_name(*id).unwrap_or("?").to_string(),
+            Value::Cons(_) => self.display_cons(val),
+            _ => format!("{}", val),
+        }
+    }
+
+    fn display_cons(&self, val: &Value) -> String {
+        let mut out = String::from("(");
+        let mut cur = val;
+        let mut first = true;
+        while let Value::Cons(cell) = cur {
+            if !first { out.push(' '); }
+            first = false;
+            out.push_str(&self.display_value(&cell.car));
+            cur = &cell.cdr;
+        }
+        if !cur.is_nil() {
+            out.push_str(" . ");
+            out.push_str(&self.display_value(cur));
+        }
+        out.push(')');
+        out
+    }
+
     pub fn all_classes(&self) -> Vec<(String, Rc<RefCell<MoofClass>>)> {
         let mut result = Vec::new();
         for class_rc in self.all_type_classes() {

@@ -1,4 +1,3 @@
-use std::rc::Rc;
 use std::time::Instant;
 
 use rustyline::completion::{Completer, Pair};
@@ -12,7 +11,6 @@ use rustyline::{Context, Editor, Helper};
 use crate::error::{ErrorKind, MoofError};
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
-use crate::moofint::MoofInt;
 use crate::parser::Parser;
 use crate::value::Value;
 
@@ -33,6 +31,10 @@ const TIPS: &[&str] = &[
     "Use (match val (pattern body) ...) for pattern matching",
     "Use ,time (fib 30) to benchmark an expression",
     "(map f lst), (filter pred lst), (reduce f init lst) -- your functional toolkit",
+    "Lists are cons cells: (car (list 1 2 3)) \u{2192} 1, (cdr (list 1 2 3)) \u{2192} (2 3)",
+    "Numbers never overflow: (* 999999999999999999 999999999999999999)",
+    "(range 1 10) creates a lazy range -- use [r to_list] to materialize",
+    "(try (error \"boom\") (catch e [e class])) \u{2192} \"RuntimeError\"",
 ];
 
 const KEYWORDS: &[&str] = &[
@@ -43,7 +45,8 @@ const KEYWORDS: &[&str] = &[
 
 const META_COMMANDS: &[&str] = &[
     ",help", ",quit", ",exit", ",version", ",env", ",type", ",doc",
-    ",methods", ",classes", ",load", ",time", ",clear", ",reset",
+    ",methods", ",classes", ",protocols", ",ast", ",load", ",time",
+    ",clear", ",reset",
 ];
 
 const COMMON_SELECTORS: &[&str] = &[
@@ -54,6 +57,114 @@ const COMMON_SELECTORS: &[&str] = &[
     "to_s", "to_i", "to_f", "abs", "nil?", "class", "not",
     "pow:", "max:", "min:", "sqrt",
 ];
+
+// ── Symbol-resolving display ───────────────────────────────────────
+
+fn display_value(val: &Value, interp: &Interpreter) -> String {
+    match val {
+        Value::Symbol(id) => interp
+            .symbols
+            .try_name(*id)
+            .unwrap_or("?")
+            .to_string(),
+        Value::Cons(_) => display_cons(val, interp),
+        Value::Table(tbl) => {
+            let tbl = tbl.borrow();
+            let has_array = !tbl.array.is_empty();
+            let has_hash = !tbl.hash.is_empty();
+            let mut out = String::from("{");
+            let mut first = true;
+            if has_array {
+                for v in &tbl.array {
+                    if !first {
+                        out.push_str(", ");
+                    }
+                    first = false;
+                    out.push_str(&display_value(v, interp));
+                }
+            }
+            if has_hash {
+                for (k, v) in &tbl.hash {
+                    if !first {
+                        out.push_str(", ");
+                    }
+                    first = false;
+                    out.push_str(k);
+                    out.push_str(": ");
+                    out.push_str(&display_value(v, interp));
+                }
+            }
+            out.push('}');
+            out
+        }
+        Value::Object(obj) => {
+            let obj = obj.borrow();
+            let class = obj.class.borrow();
+            let class_name = interp
+                .symbols
+                .try_name(class.name)
+                .unwrap_or("?");
+            let field_names = class.all_field_names();
+            if field_names.is_empty() {
+                format!("#<{class_name}>")
+            } else {
+                let fields: Vec<String> = field_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &fid)| {
+                        let fname = interp.symbols.try_name(fid).unwrap_or("?");
+                        let fval = obj
+                            .fields
+                            .get(i)
+                            .map(|v| display_value(v, interp))
+                            .unwrap_or_else(|| "nil".to_string());
+                        format!("{fname}: {fval}")
+                    })
+                    .collect();
+                format!("#<{class_name} {}>", fields.join(", "))
+            }
+        }
+        Value::Closure(c) => {
+            let arity = c.params.len();
+            if let Some(name_id) = c.name {
+                let name = interp.symbols.try_name(name_id).unwrap_or("?");
+                format!("<{name}/{arity}>")
+            } else {
+                format!("<lambda/{arity}>")
+            }
+        }
+        Value::Str(s) => format!("{:?}", &**s),
+        _ => val.inspect(),
+    }
+}
+
+fn display_cons(val: &Value, interp: &Interpreter) -> String {
+    let mut out = String::from("(");
+    let mut current = val;
+    let mut first = true;
+
+    loop {
+        match current {
+            Value::Cons(cell) => {
+                if !first {
+                    out.push(' ');
+                }
+                first = false;
+                out.push_str(&display_value(&cell.car, interp));
+                current = &cell.cdr;
+            }
+            Value::Nil => break,
+            other => {
+                out.push_str(" . ");
+                out.push_str(&display_value(other, interp));
+                break;
+            }
+        }
+    }
+
+    out.push(')');
+    out
+}
 
 // ── Completion ──────────────────────────────────────────────────────
 
@@ -89,6 +200,30 @@ impl MoofHelper {
         }
         // Add environment bindings (resolve SymIds to names)
         for (id, _) in interp.global_env.bindings() {
+            if let Some(name) = interp.symbols.try_name(id) {
+                let s = name.to_string();
+                if !self.completions.contains(&s) {
+                    self.completions.push(s);
+                }
+            }
+        }
+        // Add class names
+        for (name, _) in interp.all_classes() {
+            if !self.completions.contains(&name) {
+                self.completions.push(name);
+            }
+        }
+        // Add protocol names
+        for &id in interp.protocol_registry.keys() {
+            if let Some(name) = interp.symbols.try_name(id) {
+                let s = name.to_string();
+                if !self.completions.contains(&s) {
+                    self.completions.push(s);
+                }
+            }
+        }
+        // Add trait names
+        for &id in interp.trait_registry.keys() {
             if let Some(name) = interp.symbols.try_name(id) {
                 let s = name.to_string();
                 if !self.completions.contains(&s) {
@@ -229,7 +364,7 @@ pub fn run_repl() {
                         let _ = interp.global_env.set(underscore, result.clone());
 
                         let elapsed = eval_start.elapsed().as_secs_f64();
-                        let inspected = result.inspect();
+                        let inspected = display_value(&result, &interp);
                         let type_name = result.type_name();
 
                         if elapsed >= 0.1 {
@@ -306,6 +441,8 @@ fn handle_meta_command(input: &str, interp: &mut Interpreter) {
         ",doc" | ",d" => cmd_doc(interp, arg),
         ",methods" | ",m" => cmd_methods(interp, arg),
         ",classes" => cmd_classes(interp),
+        ",protocols" => cmd_protocols(interp),
+        ",ast" => cmd_ast(interp, arg),
         ",load" => cmd_load(interp, arg),
         ",time" => cmd_time(interp, arg),
         ",clear" => print!("\x1b[2J\x1b[H"),
@@ -323,9 +460,11 @@ fn cmd_help() {
     println!("  \x1b[36m,help\x1b[0m  \x1b[36m,h\x1b[0m       Show this help");
     println!("  \x1b[36m,env\x1b[0m   \x1b[36m,e\x1b[0m       Show environment bindings (,env filter)");
     println!("  \x1b[36m,type\x1b[0m  \x1b[36m,t\x1b[0m       Show the type of an expression");
-    println!("  \x1b[36m,doc\x1b[0m   \x1b[36m,d\x1b[0m       Show documentation for a binding");
+    println!("  \x1b[36m,doc\x1b[0m   \x1b[36m,d\x1b[0m       Show documentation for a binding, class, or protocol");
     println!("  \x1b[36m,methods\x1b[0m \x1b[36m,m\x1b[0m     List methods for a class");
     println!("  \x1b[36m,classes\x1b[0m         List all defined classes");
+    println!("  \x1b[36m,protocols\x1b[0m       List all registered protocols");
+    println!("  \x1b[36m,ast\x1b[0m             Show parsed (desugared) form of an expression");
     println!("  \x1b[36m,load\x1b[0m            Load a .moof file");
     println!("  \x1b[36m,time\x1b[0m            Benchmark an expression");
     println!("  \x1b[36m,clear\x1b[0m           Clear the screen");
@@ -351,6 +490,14 @@ fn cmd_env(interp: &Interpreter, filter: &str) {
 
     let mut functions = Vec::new();
     let mut values = Vec::new();
+    let mut classes = Vec::new();
+
+    // Collect class names for identification
+    let class_names: Vec<String> = interp
+        .all_classes()
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
 
     for (name, val) in &entries {
         if name.starts_with("__") {
@@ -362,23 +509,101 @@ fn cmd_env(interp: &Interpreter, filter: &str) {
 
         match val {
             Value::Closure(_) => functions.push(name.clone()),
-            _ => values.push((name.clone(), val.clone())),
+            Value::Object(obj) => {
+                let obj = obj.borrow();
+                let cname = interp
+                    .symbols
+                    .try_name(obj.class.borrow().name)
+                    .unwrap_or("")
+                    .to_string();
+                // Objects whose class is a metaclass are class bindings
+                if obj.class.borrow().is_meta || class_names.contains(&name.to_string()) {
+                    classes.push(name.clone());
+                } else {
+                    values.push((name.clone(), val.clone(), cname));
+                }
+            }
+            _ => values.push((name.clone(), val.clone(), val.type_name().to_string())),
         }
     }
 
+    // Macros from macro_registry
+    let mut macros: Vec<String> = interp
+        .macro_registry
+        .keys()
+        .filter_map(|&id| {
+            let name = interp.symbols.try_name(id)?.to_string();
+            if !filter.is_empty() && !name.contains(filter) {
+                return None;
+            }
+            Some(name)
+        })
+        .collect();
+    macros.sort();
+
+    // Types (ADTs) from type_registry
+    let mut types: Vec<String> = interp
+        .type_registry
+        .iter()
+        .filter_map(|(&id, variants)| {
+            let name = interp.symbols.try_name(id)?.to_string();
+            if !filter.is_empty() && !name.contains(filter) {
+                return None;
+            }
+            let variant_names: Vec<String> = variants
+                .iter()
+                .filter_map(|&vid| interp.symbols.try_name(vid).map(|s| s.to_string()))
+                .collect();
+            Some(format!("{name}: {}", variant_names.join(" | ")))
+        })
+        .collect();
+    types.sort();
+
+    // Protocols from protocol_registry
+    let mut protocols: Vec<String> = interp
+        .protocol_registry
+        .iter()
+        .filter_map(|(&id, _selectors)| {
+            let name = interp.symbols.try_name(id)?.to_string();
+            if !filter.is_empty() && !name.contains(filter) {
+                return None;
+            }
+            Some(name)
+        })
+        .collect();
+    protocols.sort();
+
     if !values.is_empty() {
         println!("\x1b[1mValues:\x1b[0m");
-        for (name, val) in &values {
+        for (name, val, type_name) in &values {
             println!(
                 "  \x1b[36m{name}\x1b[0m = {}\x1b[2m : {}\x1b[0m",
-                val.inspect(),
-                val.type_name()
+                display_value(val, interp),
+                type_name
             );
         }
     }
     if !functions.is_empty() {
         println!("\x1b[1mFunctions:\x1b[0m ({} total)", functions.len());
         print_columns(&functions, 4);
+    }
+    if !classes.is_empty() {
+        println!("\x1b[1mClasses:\x1b[0m");
+        print_columns(&classes, 4);
+    }
+    if !protocols.is_empty() {
+        println!("\x1b[1mProtocols:\x1b[0m");
+        print_columns(&protocols, 4);
+    }
+    if !macros.is_empty() {
+        println!("\x1b[1mMacros:\x1b[0m");
+        print_columns(&macros, 4);
+    }
+    if !types.is_empty() {
+        println!("\x1b[1mTypes:\x1b[0m");
+        for t in &types {
+            println!("  \x1b[36m{t}\x1b[0m");
+        }
     }
 }
 
@@ -399,11 +624,105 @@ fn cmd_doc(interp: &mut Interpreter, arg: &str) {
         return;
     }
 
-    // Try to look up by name in the global env
-    let id = interp.symbols.intern(arg);
-    match interp.global_env.get(id) {
+    // 1. Check if it's a class
+    if let Some(class_rc) = interp.class_of_name(arg) {
+        let klass = class_rc.borrow();
+        let superclass_name = klass
+            .superclass
+            .as_ref()
+            .map(|s| {
+                interp
+                    .symbols
+                    .try_name(s.borrow().name)
+                    .unwrap_or("?")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "(none)".to_string());
+
+        let field_names: Vec<String> = klass
+            .field_names
+            .iter()
+            .filter_map(|&fid| interp.symbols.try_name(fid).map(|s| s.to_string()))
+            .collect();
+
+        let mut own_methods: Vec<String> = klass
+            .methods
+            .keys()
+            .filter_map(|&id| interp.symbols.try_name(id).map(|s| s.to_string()))
+            .collect();
+        own_methods.sort();
+
+        // Walk superclass chain for inherited methods
+        let mut sup = klass.superclass.clone();
+        drop(klass);
+        let mut inherited = Vec::new();
+        while let Some(s) = sup {
+            let sb = s.borrow();
+            for &id in sb.methods.keys() {
+                if let Some(name) = interp.symbols.try_name(id) {
+                    let name_s = name.to_string();
+                    if !own_methods.contains(&name_s) && !inherited.contains(&name_s) {
+                        inherited.push(name_s);
+                    }
+                }
+            }
+            sup = sb.superclass.clone();
+        }
+        inherited.sort();
+
+        println!("\x1b[1m{arg}\x1b[0m : \x1b[36mClass\x1b[0m");
+        if !field_names.is_empty() {
+            println!("  Fields: {}", field_names.join(", "));
+        }
+        println!("  Extends: {superclass_name}");
+        if !own_methods.is_empty() {
+            println!(
+                "  Methods: {} ({} own)",
+                own_methods.join(", "),
+                own_methods.len()
+            );
+        } else {
+            println!("  Methods: (none)");
+        }
+        if !inherited.is_empty() {
+            println!(
+                "  \x1b[2mInherited: {} (from {superclass_name})\x1b[0m",
+                inherited.join(", ")
+            );
+        }
+        return;
+    }
+
+    // 2. Check protocol registry
+    let proto_id = interp.symbols.intern(arg);
+    if let Some(selectors) = interp.protocol_registry.get(&proto_id) {
+        let selector_names: Vec<String> = selectors
+            .iter()
+            .filter_map(|&sid| interp.symbols.try_name(sid).map(|s| s.to_string()))
+            .collect();
+        println!("\x1b[1m{arg}\x1b[0m : \x1b[36mProtocol\x1b[0m");
+        println!("  Required selectors: {}", selector_names.join(", "));
+        return;
+    }
+
+    // 3. Check trait registry
+    if let Some(methods) = interp.trait_registry.get(&proto_id) {
+        let method_names: Vec<String> = methods
+            .keys()
+            .filter_map(|&mid| interp.symbols.try_name(mid).map(|s| s.to_string()))
+            .collect();
+        println!("\x1b[1m{arg}\x1b[0m : \x1b[36mTrait\x1b[0m");
+        println!("  Methods: {}", method_names.join(", "));
+        return;
+    }
+
+    // 4. Fall back to env lookup (current behavior for functions/values)
+    match interp.global_env.get(proto_id) {
         Ok(val) => {
-            println!("\x1b[1m{arg}\x1b[0m : \x1b[36m{}\x1b[0m", val.type_name());
+            println!(
+                "\x1b[1m{arg}\x1b[0m : \x1b[36m{}\x1b[0m",
+                val.type_name()
+            );
             match &val {
                 Value::Closure(c) => {
                     let params: Vec<String> = c
@@ -432,10 +751,15 @@ fn cmd_doc(interp: &mut Interpreter, arg: &str) {
                             interp.symbols.try_name(n).unwrap_or("?").to_string()
                         })
                         .unwrap_or_else(|| arg.to_string());
-                    println!("  \x1b[2m({} {}{})\x1b[0m", name_str, params.join(" "), rest);
+                    println!(
+                        "  \x1b[2m({} {}{})\x1b[0m",
+                        name_str,
+                        params.join(" "),
+                        rest
+                    );
                 }
                 other => {
-                    println!("  {}", other.inspect());
+                    println!("  {}", display_value(other, interp));
                 }
             }
         }
@@ -500,10 +824,17 @@ fn cmd_methods(interp: &mut Interpreter, arg: &str) {
 
 fn cmd_classes(interp: &Interpreter) {
     let builtin_names = [
-        "Integer", "Float", "String", "Cons", "Table", "Bool", "True", "False", "Nil", "Closure", "Range",
+        "Object", "Class", "Numeric", "Integer", "Float", "String", "Symbol",
+        "Cons", "Table", "Closure", "Range", "Bool", "TrueClass", "FalseClass",
+        "NilClass",
+    ];
+    let error_names = [
+        "Error", "SyntaxError", "RuntimeError", "NameError", "TypeError",
+        "ArityError", "MessageError", "IOError",
     ];
 
     let mut builtin_list = Vec::new();
+    let mut error_list = Vec::new();
     let mut user_list = Vec::new();
 
     for (name, class_rc) in interp.all_classes() {
@@ -515,10 +846,14 @@ fn cmd_classes(interp: &Interpreter) {
             } else {
                 builtin_list.push(name);
             }
+        } else if error_names.contains(&name.as_str()) {
+            error_list.push(name);
         } else {
             let field_count = klass.all_field_names().len();
             if field_count > 0 || method_count > 0 {
-                user_list.push(format!("{name} ({field_count} fields, {method_count} methods)"));
+                user_list.push(format!(
+                    "{name} ({field_count} fields, {method_count} methods)"
+                ));
             } else {
                 user_list.push(name);
             }
@@ -526,14 +861,99 @@ fn cmd_classes(interp: &Interpreter) {
     }
 
     builtin_list.sort();
+    error_list.sort();
     user_list.sort();
 
-    println!("\x1b[1mBuilt-in types:\x1b[0m {}", builtin_list.join(", "));
+    println!("\x1b[1mBuilt-in types:\x1b[0m");
+    println!("  {}", builtin_list.join(", "));
+
+    if !error_list.is_empty() {
+        println!();
+        println!("\x1b[1mError hierarchy:\x1b[0m");
+        println!(
+            "  Error > SyntaxError, RuntimeError > {}",
+            error_list
+                .iter()
+                .filter(|n| *n != "Error" && *n != "SyntaxError" && *n != "RuntimeError")
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    // ADTs from type_registry
+    let mut adts: Vec<String> = interp
+        .type_registry
+        .iter()
+        .filter_map(|(&id, variants)| {
+            let name = interp.symbols.try_name(id)?.to_string();
+            let variant_names: Vec<String> = variants
+                .iter()
+                .filter_map(|&vid| interp.symbols.try_name(vid).map(|s| s.to_string()))
+                .collect();
+            Some(format!("{name}: {}", variant_names.join(" | ")))
+        })
+        .collect();
+    adts.sort();
+
+    if !adts.is_empty() {
+        println!();
+        println!("\x1b[1mADTs:\x1b[0m");
+        for adt in &adts {
+            println!("  {adt}");
+        }
+    }
+
     if !user_list.is_empty() {
+        println!();
         println!("\x1b[1mUser classes:\x1b[0m");
         for c in &user_list {
             println!("  \x1b[36m{c}\x1b[0m");
         }
+    }
+}
+
+fn cmd_protocols(interp: &Interpreter) {
+    if interp.protocol_registry.is_empty() {
+        println!("\x1b[2m(no protocols registered)\x1b[0m");
+        return;
+    }
+
+    let mut entries: Vec<(String, Vec<String>)> = interp
+        .protocol_registry
+        .iter()
+        .filter_map(|(&id, selectors)| {
+            let name = interp.symbols.try_name(id)?.to_string();
+            let sel_names: Vec<String> = selectors
+                .iter()
+                .filter_map(|&sid| interp.symbols.try_name(sid).map(|s| s.to_string()))
+                .collect();
+            Some((name, sel_names))
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    println!("\x1b[1mProtocols:\x1b[0m");
+    for (name, selectors) in &entries {
+        println!("  \x1b[36m{name}\x1b[0m: {}", selectors.join(", "));
+    }
+}
+
+fn cmd_ast(interp: &mut Interpreter, arg: &str) {
+    if arg.is_empty() {
+        println!("\x1b[2mUsage: ,ast <expr>\x1b[0m");
+        return;
+    }
+    match Lexer::new(arg).tokenize() {
+        Ok(tokens) => match Parser::new(tokens, &mut interp.symbols).parse_program() {
+            Ok(exprs) => {
+                for expr in &exprs {
+                    println!("{}", display_value(expr, interp));
+                }
+            }
+            Err(e) => print_error(&e, arg),
+        },
+        Err(e) => print_error(&e, arg),
     }
 }
 
@@ -567,7 +987,7 @@ fn cmd_time(interp: &mut Interpreter, arg: &str) {
             let elapsed = start.elapsed().as_secs_f64();
             println!(
                 "\x1b[32m=> \x1b[0m{}\x1b[2m : {}\x1b[0m",
-                result.inspect(),
+                display_value(&result, interp),
                 result.type_name()
             );
             println!("\x1b[2mTime: {}\x1b[0m", format_short_time(elapsed));
