@@ -327,6 +327,9 @@ fn install_globals(interp: &mut Interpreter) {
 
     // Internal helper for curry
     register(interp, "__curry_call", builtin_curry_call);
+
+    // VM helper: try/catch via thunks
+    register(interp, "__vm_try", builtin_vm_try);
 }
 
 // ── Arithmetic ─────────────────────────────────────────────────────
@@ -623,6 +626,28 @@ fn builtin_curry_call(interp: &mut Interpreter, args: Vec<Value>) -> Result<Valu
     let rest = args[2].to_vec()?;
     all_args.extend(rest);
     invoke(interp, func, all_args)
+}
+
+// ── VM helper: try/catch ────────────────────────────────────────────
+// __vm_try(body_thunk, catch_thunk)
+// Calls body_thunk(). If it errors, calls catch_thunk(error_value).
+fn builtin_vm_try(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    check_arity("__vm_try", 2, &args)?;
+    let body = &args[0];
+    let catch_handler = &args[1];
+
+    match invoke(interp, body, vec![]) {
+        Ok(val) => Ok(val),
+        Err(e) => {
+            // Convert error to a value for the catch handler
+            let error_val = if let Some(obj) = e.error_object {
+                obj
+            } else {
+                Value::Str(Rc::from(e.message.as_str()))
+            };
+            invoke(interp, catch_handler, vec![error_val])
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

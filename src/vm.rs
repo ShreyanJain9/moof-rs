@@ -520,6 +520,7 @@ pub fn execute_bytecode(
     func: &Rc<CompiledFunction>,
     stack: &mut Vec<Value>,
     bp: usize,
+    upvalues: &[Rc<RefCell<Value>>],
 ) -> Result<Value> {
     let mut ip: usize = 0;
     let mut current_func = func.clone();
@@ -570,9 +571,15 @@ pub fn execute_bytecode(
                 let val = stack.last().cloned().unwrap_or(Value::Nil);
                 interp.global_env.define(sym, val, true);
             }
-            Op::GetUpvalue | Op::SetUpvalue => {
-                ip += 1; // skip index
-                stack.push(Value::Nil);
+            Op::GetUpvalue => {
+                let idx = code[ip] as usize; ip += 1;
+                let val = upvalues[idx].borrow().clone();
+                stack.push(val);
+            }
+            Op::SetUpvalue => {
+                let idx = code[ip] as usize; ip += 1;
+                let val = stack.last().cloned().unwrap_or(Value::Nil);
+                *upvalues[idx].borrow_mut() = val;
             }
             Op::Send | Op::TailSend => {
                 let sel = bytecode::read_u16(code, ip) as u32; ip += 2;
@@ -650,8 +657,31 @@ pub fn execute_bytecode(
             Op::MakeClosure => {
                 let proto_idx = bytecode::read_u16(code, ip) as usize; ip += 2;
                 let upvalue_count = code[ip] as usize; ip += 1;
-                ip += upvalue_count * 2; // skip upvalue descriptors
-                stack.push(func.constants[proto_idx].clone());
+
+                let proto = current_func.constants[proto_idx].clone();
+                let mut captured = Vec::with_capacity(upvalue_count);
+                for _ in 0..upvalue_count {
+                    let is_local = code[ip] != 0;
+                    let index = code[ip + 1] as usize;
+                    ip += 2;
+                    if is_local {
+                        let val = stack[current_bp + index].clone();
+                        captured.push(Rc::new(RefCell::new(val)));
+                    } else {
+                        captured.push(upvalues[index].clone());
+                    }
+                }
+                if !captured.is_empty() {
+                    if let Value::Closure(ref c) = proto {
+                        let mut new_c = (**c).clone();
+                        new_c.upvalues = captured;
+                        stack.push(Value::Closure(Rc::new(new_c)));
+                    } else {
+                        stack.push(proto);
+                    }
+                } else {
+                    stack.push(proto);
+                }
             }
             Op::Return => {
                 let result = stack.pop().unwrap_or(Value::Nil);

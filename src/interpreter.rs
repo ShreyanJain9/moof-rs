@@ -2515,7 +2515,7 @@ pub fn call_closure(
                 let val = args.get(i).cloned().unwrap_or(Value::Nil);
                 stack.push(val);
             }
-            crate::vm::execute_bytecode(interp, func, &mut stack, bp)
+            crate::vm::execute_bytecode(interp, func, &mut stack, bp, &closure.upvalues)
         }
         ClosureBody::Expr(body) => {
             let call_env = setup_call_env(interp, closure, &args)?;
@@ -2536,7 +2536,7 @@ pub fn call_closure(
                                             let val = tc_args.get(i).cloned().unwrap_or(Value::Nil);
                                             stack.push(val);
                                         }
-                                        return crate::vm::execute_bytecode(interp, func, &mut stack, 0);
+                                        return crate::vm::execute_bytecode(interp, func, &mut stack, 0, &c.upvalues);
                                     }
                                     ClosureBody::Expr(body) => {
                                         let new_env = setup_call_env(interp, c, &tc_args)?;

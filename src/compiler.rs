@@ -174,8 +174,10 @@ impl<'a> Compiler<'a> {
 
             if id == k.match_ { return self.compile_match(rest, tail); }
 
+            if id == k.try_ { return self.compile_try(rest); }
+
             // Forms not yet compiled: fall back to tree-walker via Eval opcode
-            if id == k.class || id == k.type_ || id == k.try_
+            if id == k.class || id == k.type_
                 || id == k.trait_ || id == k.protocol || id == k.module
                 || id == k.use_ || id == k.require || id == k.defmacro
                 || id == k.quasiquote || id == k.super_send
@@ -591,6 +593,49 @@ impl<'a> Compiler<'a> {
         for jump in end_jumps.into_iter().flatten() {
             self.current().builder.patch_jump(jump);
         }
+        Ok(())
+    }
+
+    fn compile_try(&mut self, args: &Value) -> Result<()> {
+        // (try body (catch e handler))
+        // Strategy: compile as __vm_try(body_thunk, catch_thunk)
+        // where body_thunk = (lambda () body) and catch_thunk = (lambda (e) handler)
+
+        let body_expr = nth_car(args, 0)?;
+        let catch_clause = nth_car(args, 1)?;
+        let catch_items = cons_to_vec(catch_clause);
+
+        // Emit: GetGlobal(__vm_try)
+        let try_sym = self.interp.symbols.intern("__vm_try");
+        self.current().builder.emit_op_u16(Op::GetGlobal, try_sym as u16);
+
+        // Emit: body thunk
+        let empty_params = Value::Nil;
+        let body_list = Value::Cons(Rc::new(crate::cons::ConsCell {
+            car: body_expr.clone(),
+            cdr: Value::Nil,
+        }));
+        self.compile_lambda_inner(None, &empty_params, &body_list)?;
+
+        // Emit: catch thunk
+        if catch_items.len() >= 3 {
+            let error_var = catch_items[1].clone();
+            let handler_expr = catch_items[2].clone();
+            let param_list = Value::Cons(Rc::new(crate::cons::ConsCell {
+                car: error_var,
+                cdr: Value::Nil,
+            }));
+            let handler_body = Value::Cons(Rc::new(crate::cons::ConsCell {
+                car: handler_expr,
+                cdr: Value::Nil,
+            }));
+            self.compile_lambda_inner(None, &param_list, &handler_body)?;
+        } else {
+            self.current().builder.emit_op(Op::LoadNil);
+        }
+
+        // Call(2): __vm_try(body_thunk, catch_thunk)
+        self.current().builder.emit_op_u8(Op::Call, 2);
         Ok(())
     }
 
