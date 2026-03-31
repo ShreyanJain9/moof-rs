@@ -16,38 +16,77 @@ cargo run -- file.moof         # run a file
 cargo run -- -e '(+ 1 2)'     # eval expression
 ```
 
-No Rust tests yet. The Ruby prototype has tests in `prototype/test/`.
-
 ## Architecture
 
-The pipeline is: **Source → Lexer → Parser → Normalizer → Interpreter**
+The pipeline is: **Source -> Lexer -> Parser -> Interpreter**
 
-1. **Lexer** (`lexer.rs`) — tokenizes source. Handles `()[]{}`, interpolated strings `$"...\(expr)..."`, hex literals, block comments `#|...|#`, colon identifiers `name:`.
+There is no normalizer or separate AST enum. The parser produces cons lists (Values), and the interpreter evaluates them directly. This is a homoiconic design.
 
-2. **Parser** (`parser.rs`) — recursive descent producing `Expr` AST. Desugars early: `(define (f x) ...)` → `Define(f, Lambda(...))`, `(and a b)` → `If(a, b, false)`, `(or a b)` → `Let(tmp, If(...))`, `(cond ...)` → nested `If`. Keyword args in calls are stripped to just their values.
+1. **Lexer** (`lexer.rs`) -- tokenizes source. Handles `()[]{}`, interpolated strings `$"...\(expr)..."`, hex literals, block comments `#|...|#`, colon identifiers `name:`.
 
-3. **Normalizer** (`normalizer.rs`) — AST-to-AST pass that lowers `MessageSend` to `Call(__send, ...)`, desugars `Pipeline`, `StringInterp`, `SelectorRef`. After normalization, the interpreter sees a minimal AST.
+2. **Parser** (`parser.rs`) -- produces `Vec<Value>` (cons lists). Absorbs all desugaring that the v1 normalizer used to do: `[]` message sends become `(__send receiver "selector" args...)`, `{}` becomes `lambda` (blocks) or `__table`/`__table-array` (table literals), `->` pipeline becomes nested calls, `$""` becomes `__str-interp`, `&sel` becomes a lambda wrapping `__send`. No AST enum -- output is cons-list Values.
 
-4. **Interpreter** (`interpreter.rs`) — tree-walking evaluator. Environment is threaded as a parameter (no save/restore pattern). TCO via trampoline using a separate `Eval` enum (not in `Value`). Owns registries for classes, protocols, macros, modules, types.
+3. **Interpreter** (`interpreter.rs`) -- classic Lisp eval on cons lists. Special forms are recognized by interned symbol comparison against `KnownSymbols`. Smalltalk-style metaclass bootstrap: every class has a metaclass, Object is the root, Class's metaclass is itself. TCO via `Eval` enum trampoline (`Eval::Val` | `Eval::TailCall`). Owns registries for classes, protocols, macros, modules, types.
 
-5. **Methods** (`methods.rs`) — unified message dispatch. ALL messages go through one path: look up selector in the receiver's class → call `Method::Builtin` or `Method::UserDefined`. Includes Levenshtein-based "did you mean?" suggestions.
+4. **Builtins** (`builtins.rs`) -- all built-in functions AND type methods. Global functions (`+`, `-`, `print`, `cons`, etc.) and per-class methods (`abs`, `length`, `map:`, etc.) are all registered as unified `Closure` values with `ClosureBody::Native`. One file, one registration pattern.
 
-6. **Builtin Methods** (`builtin_methods.rs`) — registers all built-in type methods (Integer, Float, String, List, Map, Bool, Nil, Function) on their classes at startup. Methods are `BuiltinMethodFn` closures that receive `(interp, receiver, args)`.
+5. **Symbol** (`symbol.rs`) -- symbol interning. `SymId = u32`. `SymbolTable` maps strings to IDs and back. `KnownSymbols` pre-interns all special form names, internal desugaring names, and common identifiers for O(1) comparison.
 
-7. **Builtins** (`builtins.rs`) — 24 primitive functions (arithmetic, comparison, equality, list ops, I/O, dispatch, introspection) installed as global bindings.
+6. **MoofInt** (`moofint.rs`) -- `Small(i64)` / `Big(BigInt)` auto-promotion. All arithmetic operations (`+`, `-`, `*`, `/`, `%`) promote to BigInt on overflow and shrink back when results fit in i64. Also provides `pow`, `gcd`, `abs`, `checked_div`, `checked_rem`.
 
-8. **Stdlib** (`stdlib/stdlib.moof`) — self-hosting standard library embedded via `include_str!`. Provides functional-style wrappers (map, filter, reduce), higher-order utilities, ADTs (Option, Result, Pair), protocols, macros, and type extensions.
+7. **Cons** (`cons.rs`) -- `ConsCell { car, cdr }`, `ListIter`, and helpers (`cons_to_vec`, `vec_to_cons`, `cons_length`, `cons_display`). Cons cells are immutable `Rc`-shared linked lists. This is the AST representation.
+
+8. **Value** (`value.rs`) -- 11-variant enum: `Integer(MoofInt)`, `Float(f64)`, `Bool(bool)`, `Nil`, `Symbol(SymId)`, `Str(Rc<str>)`, `Cons(Rc<ConsCell>)`, `Table(Rc<RefCell<MoofTable>>)`, `Object(Rc<RefCell<MoofObject>>)`, `Closure(Rc<MoofClosure>)`, `Range(Rc<MoofRange>)`. Also defines `MoofTable` (array+hash), `MoofObject` (class ref + fields vec), `MoofClass` (name, superclass, metaclass, methods HashMap, field_names), `MoofClosure` (params, rest_param, `ClosureBody::Expr` | `ClosureBody::Native`, captured env).
+
+9. **Environment** (`environment.rs`) -- `Env` with `SymId` keys. Parent-chain scoping. Each binding tracks mutability (`define` is mutable by default, `let` is immutable).
+
+10. **Error** (`error.rs`) -- `MoofError` with `ErrorKind` (Syntax, Runtime, Name, Message, Arity, Type, IO), message, optional line/column, and optional `error_object: Option<Value>` for the Moof-level Error class hierarchy.
+
+11. **Stdlib** (`stdlib/stdlib.moof`) -- self-hosting standard library embedded via `include_str!`. Provides functional-style wrappers (`map`, `filter`, `reduce`), higher-order utilities (`compose`, `pipe`, `partial`), type checks, numeric utilities, ADTs (`Option`, `Result`, `Pair`), protocols, macros (`when`, `unless`), and built-in type extensions.
+
+12. **REPL** (`repl.rs`) -- rustyline-based with tab completion, meta-commands (`,help`, `,env`, `,type`, `,doc`, `,methods`, `,classes`, `,load`, `,time`, `,clear`, `,reset`, `,version`, `,quit`), multi-line input, `_` for last result, startup tips.
 
 ## Key Design Decisions
 
-- **Single dispatch path**: All message sends go through `methods::send_message` → class lookup → `Method` enum. No separate hardcoded dispatch tables.
-- **Method enum**: `enum Method { Builtin(BuiltinMethodFn), UserDefined(MoofFunction) }` stored in `MoofClass.methods`. Superclass chain walked by `lookup()`.
-- **Open classes**: Any class can be reopened at runtime. Built-in types (Integer, String, etc.) are registered as classes and can be extended.
-- **Protocols subsume traits**: `MoofProtocol` has both `selectors` (required) and `default_methods` (provided). One registry, not two.
-- **Environment threading**: `eval_expr(&mut self, expr, env)` takes env as parameter. No `self.env` save/restore. Closures capture `env.clone()`.
-- **Eval enum for TCO**: `enum Eval { Val(Value), TailCall { func, args } }` — control flow is separate from runtime values.
-- **IndexMap for maps**: `Value::Map(IndexMap<String, Value>)` — O(1) lookup, preserves insertion order.
-- **Value accessors**: `as_str()`, `as_int()`, `as_float()`, `as_number()`, `as_list()`, `into_list()`, `as_bool()` for clean type extraction.
+- **Homoiconic**: Parser produces cons lists, evaluator consumes them. No `Expr` enum anywhere. The AST IS the data structure.
+- **Smalltalk metaclasses**: Every class has a metaclass. Object is the root. Class's metaclass is itself. Method dispatch walks class -> superclass chain via `MoofClass::lookup()`.
+- **Unified closures**: `ClosureBody::Expr(Value)` (cons list body) or `ClosureBody::Native(NativeFn)` (Rust fn). No separate Function/Builtin/Method types. Both globals and methods are the same `MoofClosure` type.
+- **Cons cells**: Immutable `Rc`-shared linked lists. The AST representation. Proper lists terminate with `Nil`.
+- **Tables**: Array+hash data structure (`MoofTable`), separate from the object system. `{}` syntax creates tables, not objects.
+- **BigInt**: `MoofInt` auto-promotes on overflow, shrinks back when possible. Arithmetic is safe for arbitrary precision.
+- **Symbol interning**: All identifiers, selectors, and special form names are interned to `SymId` (u32). O(1) comparison everywhere.
+- **TCO**: `Eval` enum with `TailCall { func, args }`, trampoline loop in `call_closure`. Tail-position variants exist for `if`, `do`, `let`, `match`, `cond`, `and`, `or`, `try`.
+- **Error objects**: Moof has an Error class hierarchy (Error > RuntimeError > NameError/TypeError/...). `MoofError` wraps an optional `Value` error object for catch blocks.
+- **Environment threading**: `eval(&mut self, expr, env)` takes env as parameter. No `self.env` save/restore. Closures capture `env.clone()`.
+- **Open classes**: Any class can be reopened at runtime via `(class Name ...)`. Built-in types are proper classes and can be extended with new methods.
+
+## Class Hierarchy
+
+```
+Object
+  Numeric
+    Integer
+    Float
+  String
+  Symbol
+  Cons
+  Table
+  Closure
+  Range
+  Bool
+    TrueClass
+    FalseClass
+  NilClass
+  Error
+    SyntaxError
+    RuntimeError
+      NameError
+      TypeError
+      ArityError
+      MessageError
+    IOError
+  Class (metaclass of itself)
+```
 
 ## Example Files
 
@@ -55,6 +94,6 @@ The pipeline is: **Source → Lexer → Parser → Normalizer → Interpreter**
 
 ## Documentation
 
-- `SPEC.md` — language specification
+- `README.md` — project overview with examples
 - `REFERENCE.md` — complete language reference
-- `ROADMAP.md` — improvement roadmap
+- `JOURNAL.md` — development history and session logs
