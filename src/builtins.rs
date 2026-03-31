@@ -44,6 +44,7 @@ fn register(interp: &mut Interpreter, name: &str, f: NativeFn) {
         rest_param: None,
         body: ClosureBody::Native(f),
         env: interp.global_env.clone(),
+        upvalues: Vec::new(),
     }));
     interp.global_env.define(id, closure, false);
 }
@@ -56,6 +57,7 @@ fn register_method(interp: &mut Interpreter, class: &Rc<RefCell<MoofClass>>, nam
         rest_param: None,
         body: ClosureBody::Native(f),
         env: interp.global_env.clone(),
+        upvalues: Vec::new(),
     }));
     class.borrow_mut().add_method(id, closure);
 }
@@ -2102,6 +2104,7 @@ fn install_closure_methods(interp: &mut Interpreter) {
             rest_param: Some(rest_sym),
             body: ClosureBody::Expr(body),
             env: curry_env,
+            upvalues: Vec::new(),
         })))
     });
 

@@ -20,6 +20,8 @@ struct CallFrame {
     ip: usize,
     /// Base pointer: index into the value stack where this frame's locals start
     bp: usize,
+    /// Captured upvalues for this closure invocation
+    upvalues: Vec<Rc<RefCell<Value>>>,
 }
 
 impl CallFrame {
@@ -51,14 +53,12 @@ pub struct VM {
     stack: Vec<Value>,
     /// Call frame stack
     frames: Vec<CallFrame>,
-    /// Inline cache: keyed by (func_ptr, bytecode_offset) pair
-    /// Using a flat Vec indexed by a hash for speed.
+    /// Inline cache
     send_cache: Vec<Option<InlineCache>>,
 }
 
 impl VM {
     pub fn new(interp: Interpreter) -> Self {
-        // Pre-allocate cache with 1024 slots (power of 2 for fast modulo)
         let mut send_cache = Vec::with_capacity(1024);
         send_cache.resize_with(1024, || None);
         VM {
@@ -79,7 +79,7 @@ impl VM {
             self.stack.push(Value::Nil);
         }
 
-        self.frames.push(CallFrame { func, ip: 0, bp });
+        self.frames.push(CallFrame { func, ip: 0, bp, upvalues: Vec::new() });
         self.run()
     }
 
@@ -134,14 +134,15 @@ impl VM {
                 }
 
                 Op::GetUpvalue => {
-                    let _idx = frame.read_u8();
-                    // Phase 1: upvalues not yet implemented
-                    self.stack.push(Value::Nil);
+                    let idx = frame.read_u8() as usize;
+                    let val = frame.upvalues[idx].borrow().clone();
+                    self.stack.push(val);
                 }
 
                 Op::SetUpvalue => {
-                    let _idx = frame.read_u8();
-                    // Phase 1: upvalues not yet implemented
+                    let idx = frame.read_u8() as usize;
+                    let val = self.stack.last().cloned().unwrap_or(Value::Nil);
+                    *frame.upvalues[idx].borrow_mut() = val;
                 }
 
                 Op::GetGlobal => {
@@ -239,13 +240,32 @@ impl VM {
                     let proto_idx = frame.read_u16() as usize;
                     let upvalue_count = frame.read_u8() as usize;
 
-                    // Skip upvalue descriptors for now
-                    let frame = self.frames.last_mut().unwrap();
-                    frame.ip += upvalue_count * 2;
-
                     let proto = frame.func.constants[proto_idx].clone();
-                    // The proto is already a closure Value with Bytecode body
-                    self.stack.push(proto);
+
+                    // Capture upvalues from the current frame
+                    let mut captured_upvalues = Vec::with_capacity(upvalue_count);
+                    let frame = self.frames.last_mut().unwrap();
+                    for _ in 0..upvalue_count {
+                        let is_local = frame.func.code[frame.ip] != 0;
+                        let index = frame.func.code[frame.ip + 1] as usize;
+                        frame.ip += 2;
+
+                        if is_local {
+                            let val = self.stack[frame.bp + index].clone();
+                            captured_upvalues.push(Rc::new(RefCell::new(val)));
+                        } else {
+                            captured_upvalues.push(frame.upvalues[index].clone());
+                        }
+                    }
+
+                    // Create new closure with captured upvalues
+                    if let Value::Closure(ref c) = proto {
+                        let mut new_closure = (**c).clone();
+                        new_closure.upvalues = captured_upvalues;
+                        self.stack.push(Value::Closure(Rc::new(new_closure)));
+                    } else {
+                        self.stack.push(proto);
+                    }
                 }
 
                 Op::Return => {
@@ -349,6 +369,7 @@ impl VM {
                         func: func.clone(),
                         ip: 0,
                         bp,
+                        upvalues: c.upvalues.clone(),
                     });
                     Ok(())
                 }
@@ -404,6 +425,7 @@ impl VM {
                 self.stack.truncate(bp + func.local_count as usize);
                 frame.func = func.clone();
                 frame.ip = 0;
+                frame.upvalues = c.upvalues.clone();
                 return Ok(());
             }
         }

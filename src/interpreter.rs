@@ -896,6 +896,7 @@ impl Interpreter {
                     rest_param,
                     body: ClosureBody::Expr(body),
                     env: env.clone(),
+                            upvalues: Vec::new(),
                 });
                 let val = Value::Closure(closure);
                 env.define(name_id, val.clone(), true);
@@ -937,6 +938,7 @@ impl Interpreter {
             rest_param,
             body: ClosureBody::Expr(body),
             env: env.clone(),
+                            upvalues: Vec::new(),
         })))
     }
 
@@ -1195,6 +1197,7 @@ impl Interpreter {
             rest_param,
             body: ClosureBody::Expr(body),
             env: env.clone(),
+                            upvalues: Vec::new(),
         }));
 
         self.macro_registry.insert(name_id, closure);
@@ -1541,6 +1544,7 @@ impl Interpreter {
                             rest_param,
                             body: ClosureBody::Expr(body),
                             env: env.clone(),
+                            upvalues: Vec::new(),
                         }));
                         methods.push((sel_id, closure));
                     }
@@ -1565,6 +1569,7 @@ impl Interpreter {
                             rest_param,
                             body: ClosureBody::Expr(body),
                             env: env.clone(),
+                            upvalues: Vec::new(),
                         }));
                         class_methods.push((sel_id, closure));
                     }
@@ -1770,6 +1775,7 @@ impl Interpreter {
                             rest_param,
                             body: ClosureBody::Expr(body),
                             env: env.clone(),
+                            upvalues: Vec::new(),
                         }));
                         trait_methods.insert(sel_id, closure);
                     }

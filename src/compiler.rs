@@ -359,9 +359,11 @@ impl<'a> Compiler<'a> {
                 let val_expr = nth_car(args, 1)?;
                 self.compile_expr(val_expr, false)?;
                 if self.scopes.len() > 1 {
-                    // Inside a function — local define
-                    self.current().add_local(*name, true);
-                    // Value is already on stack at the local's position
+                    // Inside a function — local define.
+                    // Add a local slot and emit SetLocal to store the value there.
+                    let slot = self.current().add_local(*name, true);
+                    self.current().builder.emit_op_u8(Op::SetLocal, slot);
+                    // SetLocal leaves value on stack — that's the define's "result"
                 } else {
                     // Top-level — global define
                     self.current().builder.emit_op_u16(Op::SetGlobal, *name as u16);
@@ -378,14 +380,7 @@ impl<'a> Compiler<'a> {
         })?;
         let val_expr = nth_car(args, 1)?;
         self.compile_expr(val_expr, false)?;
-
-        // Try local first, then global
-        if let Some(slot) = self.current().resolve_local(name) {
-            self.current().builder.emit_op_u8(Op::SetLocal, slot);
-        } else {
-            self.current().builder.emit_op_u16(Op::SetGlobal, name as u16);
-        }
-        Ok(())
+        self.compile_var_set(name)
     }
 
     fn compile_lambda(&mut self, args: &Value) -> Result<()> {
@@ -441,6 +436,7 @@ impl<'a> Compiler<'a> {
         self.current().builder.emit_op(Op::Return);
 
         let func = self.finish_function()?;
+        let upvalue_descs = func.upvalues.clone();
 
         // Store the compiled function as a constant in the enclosing scope
         let env_placeholder = self.interp.global_env.clone();
@@ -450,13 +446,18 @@ impl<'a> Compiler<'a> {
             rest_param: None,
             body: ClosureBody::Bytecode(Rc::new(func)),
             env: env_placeholder,
+            upvalues: Vec::new(), // populated at runtime by MakeClosure
         }));
         let proto_idx = self.current().builder.add_constant(closure_val);
 
-        // Emit MakeClosure with 0 upvalues for Phase 1
+        // Emit MakeClosure with upvalue descriptors
         let scope = self.current();
         scope.builder.emit_op_u16(Op::MakeClosure, proto_idx);
-        scope.builder.code.push(0); // 0 upvalues for now
+        scope.builder.code.push(upvalue_descs.len() as u8);
+        for desc in &upvalue_descs {
+            scope.builder.code.push(if desc.is_local { 1 } else { 0 });
+            scope.builder.code.push(desc.index);
+        }
 
         Ok(())
     }
@@ -630,13 +631,76 @@ impl<'a> Compiler<'a> {
     // ═══════════════════════════════════════════════════════════════════
 
     fn compile_var_get(&mut self, name: SymId) -> Result<()> {
-        if let Some(slot) = self.current().resolve_local(name) {
-            self.current().builder.emit_op_u8(Op::GetLocal, slot);
-        } else {
-            // For Phase 1: no upvalues, fall back to global
-            self.current().builder.emit_op_u16(Op::GetGlobal, name as u16);
+        let depth = self.scopes.len();
+        // Check current scope locals
+        if let Some(slot) = self.scopes[depth - 1].resolve_local(name) {
+            self.scopes[depth - 1].builder.emit_op_u8(Op::GetLocal, slot);
+            return Ok(());
         }
+        // Check for upvalue (variable in enclosing scope)
+        if let Some(upvalue_idx) = self.resolve_upvalue(depth - 1, name) {
+            self.scopes[depth - 1].builder.emit_op_u8(Op::GetUpvalue, upvalue_idx);
+            return Ok(());
+        }
+        // Fall back to global
+        self.scopes[depth - 1].builder.emit_op_u16(Op::GetGlobal, name as u16);
         Ok(())
+    }
+
+    fn compile_var_set(&mut self, name: SymId) -> Result<()> {
+        let depth = self.scopes.len();
+        if let Some(slot) = self.scopes[depth - 1].resolve_local(name) {
+            self.scopes[depth - 1].builder.emit_op_u8(Op::SetLocal, slot);
+            return Ok(());
+        }
+        if let Some(upvalue_idx) = self.resolve_upvalue(depth - 1, name) {
+            self.scopes[depth - 1].builder.emit_op_u8(Op::SetUpvalue, upvalue_idx);
+            return Ok(());
+        }
+        self.scopes[depth - 1].builder.emit_op_u16(Op::SetGlobal, name as u16);
+        Ok(())
+    }
+
+    /// Resolve a variable as an upvalue by walking enclosing scopes.
+    /// Returns the upvalue index in the current scope, or None.
+    fn resolve_upvalue(&mut self, scope_idx: usize, name: SymId) -> Option<u8> {
+        if scope_idx == 0 {
+            return None; // Top-level scope — no enclosing function
+        }
+
+        let enclosing_idx = scope_idx - 1;
+
+        // Check if the variable is a local in the immediately enclosing scope
+        if let Some(local_slot) = self.scopes[enclosing_idx].resolve_local(name) {
+            self.scopes[enclosing_idx].locals[local_slot as usize].is_captured = true;
+            return Some(self.add_upvalue(scope_idx, UpvalueDesc {
+                is_local: true,
+                index: local_slot,
+            }));
+        }
+
+        // Recursively check further enclosing scopes
+        if let Some(upvalue_in_enclosing) = self.resolve_upvalue(enclosing_idx, name) {
+            return Some(self.add_upvalue(scope_idx, UpvalueDesc {
+                is_local: false,
+                index: upvalue_in_enclosing,
+            }));
+        }
+
+        None
+    }
+
+    /// Add an upvalue descriptor to the given scope, deduplicating.
+    fn add_upvalue(&mut self, scope_idx: usize, desc: UpvalueDesc) -> u8 {
+        // Check if this upvalue already exists
+        for (i, existing) in self.scopes[scope_idx].upvalues.iter().enumerate() {
+            if existing.is_local == desc.is_local && existing.index == desc.index {
+                return i as u8;
+            }
+        }
+        let idx = self.scopes[scope_idx].upvalues.len() as u8;
+        self.scopes[scope_idx].upvalues.push(desc);
+        idx
     }
 
     // ═══════════════════════════════════════════════════════════════════

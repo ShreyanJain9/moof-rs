@@ -218,6 +218,8 @@ pub struct MoofClosure {
     pub rest_param: Option<SymId>,
     pub body: ClosureBody,
     pub env: crate::environment::Env,
+    /// Captured upvalues for bytecode closures (empty for Expr/Native closures)
+    pub upvalues: Vec<std::rc::Rc<std::cell::RefCell<Value>>>,
 }
 
 pub enum ClosureBody {
@@ -267,6 +269,7 @@ impl Clone for MoofClosure {
             rest_param: self.rest_param,
             body: self.body.clone(),
             env: self.env.clone(),
+            upvalues: self.upvalues.clone(),
         }
     }
 }
