@@ -20,7 +20,15 @@
       "Bash(do echo:*)",
       "Bash(done)",
       "Bash(cargo test:*)",
-      "Bash(wc -l /Users/shreyan.jain27/Stuff/moof/src/*.rs)"
+      "Bash(wc -l /Users/shreyan.jain27/Stuff/moof/src/*.rs)",
+      "Bash(cd:*)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(./target/debug/moof prototype/examples/messages.moof)",
+      "Bash(./target/debug/moof -e '\\(+ 1 2\\)')",
+      "Bash(./target/debug/moof -e '\\(* 999999999999999999 999999999999999999\\)')",
+      "Bash(./target/debug/moof -e '[\"\"hello\"\" uppercase]')",
+      "Bash(./target/debug/moof -e '\\(car \\(list 1 2 3\\)\\)')",
+      "Bash(./target/debug/moof -e '\\(cdr \\(list 1 2 3\\)\\)')"
     ]
   }
 }
