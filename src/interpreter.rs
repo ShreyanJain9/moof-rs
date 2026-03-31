@@ -11,6 +11,15 @@ use crate::value::{
 };
 
 // ═══════════════════════════════════════════════════════════════════════
+// Tail-call optimization
+// ═══════════════════════════════════════════════════════════════════════
+
+pub enum Eval {
+    Val(Value),
+    TailCall { func: Value, args: Vec<Value> },
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Interpreter
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -20,6 +29,9 @@ pub struct Interpreter {
     pub global_env: Env,
     pub macro_registry: HashMap<SymId, Value>,
     pub type_registry: HashMap<SymId, Vec<SymId>>,
+    pub protocol_registry: HashMap<SymId, Vec<SymId>>,
+    pub trait_registry: HashMap<SymId, HashMap<SymId, Value>>,
+    pub module_registry: HashMap<SymId, HashMap<SymId, Value>>,
 
     // Bootstrap type classes
     pub object_class: Rc<RefCell<MoofClass>>,
@@ -31,11 +43,19 @@ pub struct Interpreter {
     pub cons_class: Rc<RefCell<MoofClass>>,
     pub table_class: Rc<RefCell<MoofClass>>,
     pub closure_class: Rc<RefCell<MoofClass>>,
+    pub range_class: Rc<RefCell<MoofClass>>,
     pub true_class: Rc<RefCell<MoofClass>>,
     pub false_class: Rc<RefCell<MoofClass>>,
     pub nil_class: Rc<RefCell<MoofClass>>,
     pub numeric_class: Rc<RefCell<MoofClass>>,
     pub error_class: Rc<RefCell<MoofClass>>,
+    pub syntax_error_class: Rc<RefCell<MoofClass>>,
+    pub runtime_error_class: Rc<RefCell<MoofClass>>,
+    pub name_error_class: Rc<RefCell<MoofClass>>,
+    pub type_error_class: Rc<RefCell<MoofClass>>,
+    pub arity_error_class: Rc<RefCell<MoofClass>>,
+    pub message_error_class: Rc<RefCell<MoofClass>>,
+    pub io_error_class: Rc<RefCell<MoofClass>>,
 
     pub source_locs: HashMap<usize, (usize, usize)>,
 }
@@ -136,6 +156,15 @@ impl Interpreter {
             is_meta: false,
         }));
 
+        let range_class = Rc::new(RefCell::new(MoofClass {
+            name: symbols.intern("Range"),
+            superclass: Some(object_class.clone()),
+            metaclass: Some(class_class.clone()),
+            methods: HashMap::new(),
+            field_names: Vec::new(),
+            is_meta: false,
+        }));
+
         // Bool is abstract; TrueClass and FalseClass are concrete
         let bool_class = Rc::new(RefCell::new(MoofClass {
             name: symbols.intern("Bool"),
@@ -173,14 +202,35 @@ impl Interpreter {
             is_meta: false,
         }));
 
+        let message_field = symbols.intern("message");
+
         let error_class = Rc::new(RefCell::new(MoofClass {
             name: symbols.intern("Error"),
             superclass: Some(object_class.clone()),
             metaclass: Some(class_class.clone()),
             methods: HashMap::new(),
-            field_names: Vec::new(),
+            field_names: vec![message_field],
             is_meta: false,
         }));
+
+        let make_error_subclass = |symbols: &mut SymbolTable, name: &str, parent: &Rc<RefCell<MoofClass>>| -> Rc<RefCell<MoofClass>> {
+            Rc::new(RefCell::new(MoofClass {
+                name: symbols.intern(name),
+                superclass: Some(parent.clone()),
+                metaclass: Some(class_class.clone()),
+                methods: HashMap::new(),
+                field_names: Vec::new(),
+                is_meta: false,
+            }))
+        };
+
+        let syntax_error_class = make_error_subclass(&mut symbols, "SyntaxError", &error_class);
+        let runtime_error_class = make_error_subclass(&mut symbols, "RuntimeError", &error_class);
+        let name_error_class = make_error_subclass(&mut symbols, "NameError", &runtime_error_class);
+        let type_error_class = make_error_subclass(&mut symbols, "TypeError", &runtime_error_class);
+        let arity_error_class = make_error_subclass(&mut symbols, "ArityError", &runtime_error_class);
+        let message_error_class = make_error_subclass(&mut symbols, "MessageError", &runtime_error_class);
+        let io_error_class = make_error_subclass(&mut symbols, "IOError", &error_class);
 
         let mut interp = Interpreter {
             symbols,
@@ -188,6 +238,9 @@ impl Interpreter {
             global_env: Env::new(),
             macro_registry: HashMap::new(),
             type_registry: HashMap::new(),
+            protocol_registry: HashMap::new(),
+            trait_registry: HashMap::new(),
+            module_registry: HashMap::new(),
             object_class,
             class_class,
             integer_class,
@@ -197,11 +250,19 @@ impl Interpreter {
             cons_class,
             table_class,
             closure_class,
+            range_class,
             true_class,
             false_class,
             nil_class,
             numeric_class,
             error_class,
+            syntax_error_class,
+            runtime_error_class,
+            name_error_class,
+            type_error_class,
+            arity_error_class,
+            message_error_class,
+            io_error_class,
             source_locs: HashMap::new(),
         };
 
@@ -267,11 +328,41 @@ impl Interpreter {
             self.cons_class.clone(),
             self.table_class.clone(),
             self.closure_class.clone(),
+            self.range_class.clone(),
             self.true_class.clone(),
             self.false_class.clone(),
             self.nil_class.clone(),
             self.error_class.clone(),
+            self.syntax_error_class.clone(),
+            self.runtime_error_class.clone(),
+            self.name_error_class.clone(),
+            self.type_error_class.clone(),
+            self.arity_error_class.clone(),
+            self.message_error_class.clone(),
+            self.io_error_class.clone(),
         ]
+    }
+
+    /// Create a Moof error object (instance of an Error subclass).
+    pub fn make_error_object(&self, class: &Rc<RefCell<MoofClass>>, message: &str) -> Value {
+        Value::Object(Rc::new(RefCell::new(MoofObject {
+            class: class.clone(),
+            fields: vec![Value::Str(Rc::from(message))],
+        })))
+    }
+
+    /// Map an ErrorKind to the appropriate error class.
+    pub fn error_class_for_kind(&self, kind: &crate::error::ErrorKind) -> Rc<RefCell<MoofClass>> {
+        use crate::error::ErrorKind;
+        match kind {
+            ErrorKind::Syntax => self.syntax_error_class.clone(),
+            ErrorKind::Runtime => self.runtime_error_class.clone(),
+            ErrorKind::Name => self.name_error_class.clone(),
+            ErrorKind::Type => self.type_error_class.clone(),
+            ErrorKind::Arity => self.arity_error_class.clone(),
+            ErrorKind::Message => self.message_error_class.clone(),
+            ErrorKind::IO => self.io_error_class.clone(),
+        }
     }
 
     // ── Core eval ───────────────────────────────────────────────────
@@ -286,7 +377,8 @@ impl Interpreter {
             | Value::Str(_)
             | Value::Table(_)
             | Value::Object(_)
-            | Value::Closure(_) => Ok(expr.clone()),
+            | Value::Closure(_)
+            | Value::Range(_) => Ok(expr.clone()),
 
             // Symbol lookup
             Value::Symbol(id) => env.get(*id).map_err(|_| {
@@ -369,16 +461,16 @@ impl Interpreter {
                         return self.eval_type_def(cdr, env);
                     }
                     if id == k.protocol {
-                        return Ok(Value::Nil);
+                        return self.eval_protocol(cdr, env);
                     }
                     if id == k.trait_ {
-                        return Ok(Value::Nil);
+                        return self.eval_trait(cdr, env);
                     }
                     if id == k.module {
-                        return Ok(Value::Nil);
+                        return self.eval_module(cdr, env);
                     }
                     if id == k.use_ {
-                        return Ok(Value::Nil);
+                        return self.eval_use(cdr, env);
                     }
 
                     // Macro check
@@ -392,6 +484,316 @@ impl Interpreter {
                 let args = self.eval_args(cdr, env)?;
                 self.invoke(callee, args)
             }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Tail-position evaluation (returns Eval instead of Value)
+    // ═══════════════════════════════════════════════════════════════════
+
+    pub fn eval_tail(&mut self, expr: &Value, env: &Env) -> Result<Eval> {
+        match expr {
+            // Self-evaluating
+            Value::Integer(_)
+            | Value::Float(_)
+            | Value::Bool(_)
+            | Value::Nil
+            | Value::Str(_)
+            | Value::Table(_)
+            | Value::Object(_)
+            | Value::Closure(_)
+            | Value::Range(_) => Ok(Eval::Val(expr.clone())),
+
+            // Symbol lookup
+            Value::Symbol(id) => {
+                let val = env.get(*id).map_err(|_| {
+                    let name = self.symbols.name(*id);
+                    MoofError::name(format!("Undefined variable: {name}"))
+                })?;
+                Ok(Eval::Val(val))
+            }
+
+            // Compound form
+            Value::Cons(cell) => {
+                let car = &cell.car;
+                let cdr = &cell.cdr;
+
+                if let Value::Symbol(id) = car {
+                    let id = *id;
+                    let k = &self.known;
+
+                    // Tail-position special forms
+                    if id == k.if_ {
+                        return self.eval_tail_if(cdr, env);
+                    }
+                    if id == k.do_ {
+                        return self.eval_tail_do(cdr, env);
+                    }
+                    if id == k.let_ {
+                        return self.eval_tail_let(cdr, env);
+                    }
+                    if id == k.match_ {
+                        return self.eval_tail_match(cdr, env);
+                    }
+                    if id == k.cond {
+                        return self.eval_tail_cond(cdr, env);
+                    }
+                    if id == k.and {
+                        return self.eval_tail_and(cdr, env);
+                    }
+                    if id == k.or {
+                        return self.eval_tail_or(cdr, env);
+                    }
+                    if id == k.try_ {
+                        return self.eval_tail_try(cdr, env);
+                    }
+
+                    // Non-tail special forms: delegate to eval, wrap in Val
+                    if id == k.define
+                        || id == k.lambda
+                        || id == k.fn_
+                        || id == k.set_bang
+                        || id == k.quote
+                        || id == k.quasiquote
+                        || id == k.defmacro
+                        || id == k.require
+                        || id == k.send
+                        || id == k.table
+                        || id == k.table_array
+                        || id == k.str_interp
+                        || id == k.type_
+                        || id == k.protocol
+                        || id == k.trait_
+                        || id == k.module
+                        || id == k.use_
+                        || id == k.class
+                    {
+                        return Ok(Eval::Val(self.eval(expr, env)?));
+                    }
+
+                    // Macro check
+                    if let Some(macro_val) = self.macro_registry.get(&id).cloned() {
+                        let expanded = self.expand_macro_to_ast(&macro_val, cdr)?;
+                        return self.eval_tail(&expanded, env);
+                    }
+                }
+
+                // General function call: eval head and args, return TailCall for closures
+                let callee = self.eval(car, env)?;
+                let args = self.eval_args(cdr, env)?;
+
+                match &callee {
+                    Value::Closure(c) => match &c.body {
+                        ClosureBody::Native(f) => Ok(Eval::Val(f(self, args)?)),
+                        ClosureBody::Expr(_) => Ok(Eval::TailCall { func: callee.clone(), args }),
+                    },
+                    // For non-closures (e.g. class constructors), invoke normally
+                    _ => Ok(Eval::Val(self.invoke(callee, args)?)),
+                }
+            }
+        }
+    }
+
+    // ── Tail-position special form helpers ──────────────────────────
+
+    fn eval_tail_if(&mut self, args: &Value, env: &Env) -> Result<Eval> {
+        let cond_expr = nth_car(args, 0)?;
+        let then_expr = nth_car(args, 1)?;
+        let cond_val = self.eval(cond_expr, env)?;
+        if cond_val.is_truthy() {
+            self.eval_tail(then_expr, env)
+        } else {
+            match nth_car(args, 2) {
+                Ok(else_expr) => self.eval_tail(else_expr, env),
+                Err(_) => Ok(Eval::Val(Value::Nil)),
+            }
+        }
+    }
+
+    fn eval_tail_do(&mut self, args: &Value, env: &Env) -> Result<Eval> {
+        let mut cursor = args;
+        while let Value::Cons(cell) = cursor {
+            if cell.cdr.is_nil() {
+                // Last expression: tail position
+                return self.eval_tail(&cell.car, env);
+            }
+            self.eval(&cell.car, env)?;
+            cursor = &cell.cdr;
+        }
+        Ok(Eval::Val(Value::Nil))
+    }
+
+    fn eval_tail_let(&mut self, args: &Value, env: &Env) -> Result<Eval> {
+        let bindings_expr = nth_car(args, 0)?;
+        let body_list = nth_cdr(args, 0)?;
+
+        let let_env = env.child();
+
+        let mut cursor = bindings_expr;
+        while let Value::Cons(cell) = cursor {
+            let pair = &cell.car;
+            let name_id = nth_car(pair, 0)?.as_symbol().map_err(|_| {
+                MoofError::runtime("let: binding name must be a symbol")
+            })?;
+            let val_expr = nth_car(pair, 1)?;
+            let val = self.eval(val_expr, env)?;
+            let_env.define(name_id, val, false);
+            cursor = &cell.cdr;
+        }
+
+        self.eval_tail_body(body_list, &let_env)
+    }
+
+    fn eval_tail_match(&mut self, args: &Value, env: &Env) -> Result<Eval> {
+        let scrutinee_expr = nth_car(args, 0)?;
+        let scrutinee = self.eval(scrutinee_expr, env)?;
+
+        let clauses = nth_cdr(args, 0)?;
+        let mut cursor = clauses;
+        while let Value::Cons(cell) = cursor {
+            let clause = &cell.car;
+            let pattern = nth_car(clause, 0)?;
+            let body = nth_car(clause, 1)?;
+
+            let match_env = env.child();
+            if self.match_pattern(pattern, &scrutinee, &match_env) {
+                return self.eval_tail(body, &match_env);
+            }
+            cursor = &cell.cdr;
+        }
+        Ok(Eval::Val(Value::Nil))
+    }
+
+    fn eval_tail_cond(&mut self, args: &Value, env: &Env) -> Result<Eval> {
+        let mut cursor = args;
+        while let Value::Cons(cell) = cursor {
+            let clause = &cell.car;
+            let test_expr = nth_car(clause, 0)?;
+            let body_expr = nth_car(clause, 1)?;
+
+            if let Value::Symbol(id) = test_expr {
+                if *id == self.known.else_ {
+                    return self.eval_tail(body_expr, env);
+                }
+            }
+
+            let test_val = self.eval(test_expr, env)?;
+            if test_val.is_truthy() {
+                return self.eval_tail(body_expr, env);
+            }
+            cursor = &cell.cdr;
+        }
+        Ok(Eval::Val(Value::Nil))
+    }
+
+    fn eval_tail_and(&mut self, args: &Value, env: &Env) -> Result<Eval> {
+        let a = nth_car(args, 0)?;
+        let a_val = self.eval(a, env)?;
+        if !a_val.is_truthy() {
+            return Ok(Eval::Val(Value::Bool(false)));
+        }
+        match nth_car(args, 1) {
+            Ok(b) => self.eval_tail(b, env),
+            Err(_) => Ok(Eval::Val(a_val)),
+        }
+    }
+
+    fn eval_tail_or(&mut self, args: &Value, env: &Env) -> Result<Eval> {
+        let a = nth_car(args, 0)?;
+        let a_val = self.eval(a, env)?;
+        if a_val.is_truthy() {
+            return Ok(Eval::Val(a_val));
+        }
+        match nth_car(args, 1) {
+            Ok(b) => self.eval_tail(b, env),
+            Err(_) => Ok(Eval::Val(a_val)),
+        }
+    }
+
+    fn eval_tail_try(&mut self, args: &Value, env: &Env) -> Result<Eval> {
+        let body = nth_car(args, 0)?;
+        match self.eval_tail(body, env) {
+            Ok(eval_result) => {
+                // Need to resolve TailCall before we can say "no error"
+                match eval_result {
+                    Eval::Val(_) => Ok(eval_result),
+                    Eval::TailCall { func, args: tc_args } => {
+                        // Resolve the tail call, then wrap result
+                        match self.invoke(func, tc_args) {
+                            Ok(v) => Ok(Eval::Val(v)),
+                            Err(e) => self.handle_try_catch(e, args, env),
+                        }
+                    }
+                }
+            }
+            Err(e) => self.handle_try_catch(e, args, env),
+        }
+    }
+
+    fn handle_try_catch(&mut self, e: MoofError, args: &Value, env: &Env) -> Result<Eval> {
+        let catch_form = nth_car(args, 1)?;
+        if let Value::Cons(cell) = catch_form {
+            if let Value::Symbol(id) = &cell.car {
+                if *id == self.known.catch {
+                    let var = nth_car(&cell.cdr, 0)?;
+                    let var_id = var.as_symbol().map_err(|_| {
+                        MoofError::runtime("try: catch variable must be a symbol")
+                    })?;
+                    let catch_body = nth_car(&cell.cdr, 1)?;
+                    let catch_env = env.child();
+                    catch_env.define(
+                        var_id,
+                        Value::Str(Rc::from(e.message.as_str())),
+                        false,
+                    );
+                    return Ok(Eval::Val(self.eval(catch_body, &catch_env)?));
+                }
+            }
+        }
+        Err(e)
+    }
+
+    /// Like eval_body but returns Eval — last expression is in tail position.
+    fn eval_tail_body(&mut self, body: &Value, env: &Env) -> Result<Eval> {
+        let mut cursor = body;
+        while let Value::Cons(cell) = cursor {
+            if cell.cdr.is_nil() {
+                return self.eval_tail(&cell.car, env);
+            }
+            self.eval(&cell.car, env)?;
+            cursor = &cell.cdr;
+        }
+        Ok(Eval::Val(Value::Nil))
+    }
+
+    /// Expand a macro but return the expanded AST without evaluating it.
+    fn expand_macro_to_ast(
+        &mut self,
+        macro_closure: &Value,
+        args: &Value,
+    ) -> Result<Value> {
+        let closure = match macro_closure {
+            Value::Closure(c) => c,
+            _ => return Err(MoofError::runtime("defmacro: expected closure")),
+        };
+
+        let macro_env = closure.env.child();
+        let arg_vec = list_to_vec(args);
+
+        for (i, &param_id) in closure.params.iter().enumerate() {
+            let arg = arg_vec.get(i).cloned().unwrap_or(Value::Nil);
+            macro_env.define(param_id, arg, false);
+        }
+
+        if let Some(rest_id) = closure.rest_param {
+            let rest_start = closure.params.len();
+            let rest_items: Vec<Value> = arg_vec[rest_start..].to_vec();
+            macro_env.define(rest_id, Value::from_slice(&rest_items), false);
+        }
+
+        match &closure.body {
+            ClosureBody::Expr(body) => self.eval(body, &macro_env),
+            ClosureBody::Native(f) => f(self, arg_vec),
         }
     }
 
@@ -690,11 +1092,13 @@ impl Interpreter {
                             })?;
                             let catch_body = nth_car(&cell.cdr, 1)?;
                             let catch_env = env.child();
-                            catch_env.define(
-                                var_id,
-                                Value::Str(Rc::from(e.message.as_str())),
-                                false,
-                            );
+                            let error_val = if let Some(obj) = e.error_object {
+                                obj
+                            } else {
+                                let cls = self.error_class_for_kind(&e.kind);
+                                self.make_error_object(&cls, &e.message)
+                            };
+                            catch_env.define(var_id, error_val, false);
                             return self.eval(catch_body, &catch_env);
                         }
                     }
@@ -833,6 +1237,7 @@ impl Interpreter {
             Value::Table(_) => self.table_class.clone(),
             Value::Object(obj) => obj.borrow().class.clone(),
             Value::Closure(_) => self.closure_class.clone(),
+            Value::Range(_) => self.range_class.clone(),
         }
     }
 
@@ -907,6 +1312,7 @@ impl Interpreter {
         let mut superclass: Option<Rc<RefCell<MoofClass>>> = None;
         let mut field_names: Vec<SymId> = Vec::new();
         let mut methods: Vec<(SymId, Value)> = Vec::new();
+        let mut trait_names: Vec<SymId> = Vec::new();
 
         // Walk body items
         let mut cursor = body;
@@ -938,6 +1344,16 @@ impl Interpreter {
                             fcursor = &fc.cdr;
                         }
                     }
+                    // (uses TraitName ...) — mix in trait methods
+                    else if kw == self.known.uses {
+                        let mut tcursor = &inner.cdr;
+                        while let Value::Cons(tc) = tcursor {
+                            if let Ok(trait_id) = tc.car.as_symbol() {
+                                trait_names.push(trait_id);
+                            }
+                            tcursor = &tc.cdr;
+                        }
+                    }
                     // (method selector (params...) body...)
                     else if kw == self.known.method {
                         let sel = nth_car(&inner.cdr, 0)?;
@@ -965,6 +1381,18 @@ impl Interpreter {
                 }
             }
             cursor = &cell.cdr;
+        }
+
+        // Copy trait methods (trait methods are added first so explicit methods override)
+        for trait_id in &trait_names {
+            if let Some(trait_methods) = self.trait_registry.get(trait_id).cloned() {
+                for (sel, closure) in trait_methods {
+                    // Only add if not already defined explicitly
+                    if !methods.iter().any(|(s, _)| *s == sel) {
+                        methods.push((sel, closure));
+                    }
+                }
+            }
         }
 
         // If reopening, add methods to existing class
@@ -1057,6 +1485,256 @@ impl Interpreter {
         Ok(class_val)
     }
 
+    // ── protocol ────────────────────────────────────────────────────
+
+    fn eval_protocol(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        let name_id = nth_car(args, 0)?.as_symbol().map_err(|_| {
+            MoofError::runtime("protocol: expected symbol name")
+        })?;
+
+        // Collect required selectors
+        let mut selectors = Vec::new();
+        let mut cursor = nth_cdr(args, 0)?;
+        while let Value::Cons(cell) = cursor {
+            if let Ok(sel_id) = cell.car.as_symbol() {
+                selectors.push(sel_id);
+            }
+            cursor = &cell.cdr;
+        }
+
+        // Register protocol
+        self.protocol_registry.insert(name_id, selectors.clone());
+
+        // Store a table in the environment as a marker object
+        let mut table = MoofTable::new();
+        table.hash.insert(
+            "name".to_string(),
+            Value::Str(Rc::from(self.symbols.name(name_id))),
+        );
+        let sel_values: Vec<Value> = selectors
+            .iter()
+            .map(|s| Value::Str(Rc::from(self.symbols.name(*s))))
+            .collect();
+        table.hash.insert(
+            "selectors".to_string(),
+            Value::from_slice(&sel_values),
+        );
+        table.hash.insert("type".to_string(), Value::Str(Rc::from("protocol")));
+
+        let proto_val = Value::Table(Rc::new(RefCell::new(table)));
+        env.define(name_id, proto_val.clone(), false);
+        Ok(proto_val)
+    }
+
+    // ── trait ──────────────────────────────────────────────────────────
+
+    fn eval_trait(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        let name_id = nth_car(args, 0)?.as_symbol().map_err(|_| {
+            MoofError::runtime("trait: expected symbol name")
+        })?;
+
+        let mut trait_methods: HashMap<SymId, Value> = HashMap::new();
+
+        // Walk body: each item should be (method selector (params) body...)
+        let mut cursor = nth_cdr(args, 0)?;
+        while let Value::Cons(cell) = cursor {
+            if let Value::Cons(inner) = &cell.car {
+                if let Value::Symbol(kw) = &inner.car {
+                    if *kw == self.known.method {
+                        let sel = nth_car(&inner.cdr, 0)?;
+                        let sel_id = sel.as_symbol().map_err(|_| {
+                            MoofError::runtime("trait method: expected symbol selector")
+                        })?;
+                        let params_expr = nth_car(&inner.cdr, 1)?;
+
+                        // Parse params, prepend `self`
+                        let (mut params, rest_param) = self.parse_params(params_expr)?;
+                        params.insert(0, self.known.self_);
+
+                        let method_body_list = nth_cdr(&inner.cdr, 1)?;
+                        let body = self.wrap_body(method_body_list);
+
+                        let closure = Value::Closure(Rc::new(MoofClosure {
+                            name: Some(sel_id),
+                            params,
+                            rest_param,
+                            body: ClosureBody::Expr(body),
+                            env: env.clone(),
+                        }));
+                        trait_methods.insert(sel_id, closure);
+                    }
+                }
+            }
+            cursor = &cell.cdr;
+        }
+
+        // Register the trait
+        self.trait_registry.insert(name_id, trait_methods);
+
+        // Store a marker in the environment
+        let mut table = MoofTable::new();
+        table.hash.insert(
+            "name".to_string(),
+            Value::Str(Rc::from(self.symbols.name(name_id))),
+        );
+        table.hash.insert("type".to_string(), Value::Str(Rc::from("trait")));
+
+        let trait_val = Value::Table(Rc::new(RefCell::new(table)));
+        env.define(name_id, trait_val.clone(), false);
+        Ok(trait_val)
+    }
+
+    // ── module ─────────────────────────────────────────────────────────
+
+    fn eval_module(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        let name_id = nth_car(args, 0)?.as_symbol().map_err(|_| {
+            MoofError::runtime("module: expected symbol name")
+        })?;
+
+        let body = nth_cdr(args, 0)?;
+
+        // Look for (export sym1 sym2 ...) as the first body form
+        let mut exports: Option<Vec<SymId>> = None;
+        let mut body_start = body;
+
+        if let Value::Cons(cell) = body {
+            if let Value::Cons(inner) = &cell.car {
+                if let Value::Symbol(kw) = &inner.car {
+                    let name = self.symbols.name(*kw);
+                    if name == "export" {
+                        let mut export_list = Vec::new();
+                        let mut ecursor = &inner.cdr;
+                        while let Value::Cons(ec) = ecursor {
+                            if let Ok(eid) = ec.car.as_symbol() {
+                                export_list.push(eid);
+                            }
+                            ecursor = &ec.cdr;
+                        }
+                        exports = Some(export_list);
+                        body_start = &cell.cdr;
+                    }
+                }
+            }
+        }
+
+        // Create child environment and evaluate body
+        let module_env = env.child();
+        let mut cursor = body_start;
+        while let Value::Cons(cell) = cursor {
+            self.eval(&cell.car, &module_env)?;
+            cursor = &cell.cdr;
+        }
+
+        // Collect exported bindings into a table
+        let mut module_table = MoofTable::new();
+        let mut module_bindings: HashMap<SymId, Value> = HashMap::new();
+
+        match exports {
+            Some(ref export_ids) => {
+                for &eid in export_ids {
+                    if let Ok(val) = module_env.get(eid) {
+                        let key = self.symbols.name(eid).to_string();
+                        module_table.hash.insert(key, val.clone());
+                        module_bindings.insert(eid, val);
+                    }
+                }
+            }
+            None => {
+                // No explicit exports — re-walk body AST to find define forms
+                let mut dcursor = body_start;
+                while let Value::Cons(cell) = dcursor {
+                    if let Value::Cons(inner) = &cell.car {
+                        if let Value::Symbol(kw) = &inner.car {
+                            if *kw == self.known.define {
+                                if let Ok(name_expr) = nth_car(&inner.cdr, 0) {
+                                    let def_id = match name_expr {
+                                        Value::Symbol(id) => Some(*id),
+                                        Value::Cons(c) => c.car.as_symbol().ok(),
+                                        _ => None,
+                                    };
+                                    if let Some(did) = def_id {
+                                        if let Ok(val) = module_env.get(did) {
+                                            let key = self.symbols.name(did).to_string();
+                                            module_table.hash.insert(key, val.clone());
+                                            module_bindings.insert(did, val);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    dcursor = &cell.cdr;
+                }
+            }
+        }
+
+        // Store in module registry
+        self.module_registry.insert(name_id, module_bindings);
+
+        // Define the module name in the current env as a table
+        module_table.hash.insert(
+            "name".to_string(),
+            Value::Str(Rc::from(self.symbols.name(name_id))),
+        );
+        module_table.hash.insert("type".to_string(), Value::Str(Rc::from("module")));
+
+        let module_val = Value::Table(Rc::new(RefCell::new(module_table)));
+        env.define(name_id, module_val.clone(), false);
+        Ok(module_val)
+    }
+
+    // ── use ────────────────────────────────────────────────────────────
+
+    fn eval_use(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        let name_id = nth_car(args, 0)?.as_symbol().map_err(|_| {
+            MoofError::runtime("use: expected module name symbol")
+        })?;
+
+        let module_bindings = self.module_registry.get(&name_id).cloned().ok_or_else(|| {
+            MoofError::runtime(format!(
+                "use: module '{}' not found",
+                self.symbols.name(name_id)
+            ))
+        })?;
+
+        // Check for qualifier: (use Mod (only sym1 sym2)) or (use Mod (as Alias))
+        let rest = nth_cdr(args, 0);
+        if let Ok(Value::Cons(cell)) = rest {
+            if let Value::Cons(inner) = &cell.car {
+                if let Value::Symbol(qual_id) = &inner.car {
+                    let qual_name = self.symbols.name(*qual_id).to_string();
+
+                    if qual_name == "only" {
+                        let mut icursor = &inner.cdr;
+                        while let Value::Cons(ic) = icursor {
+                            if let Ok(sym_id) = ic.car.as_symbol() {
+                                if let Some(val) = module_bindings.get(&sym_id) {
+                                    env.define(sym_id, val.clone(), false);
+                                }
+                            }
+                            icursor = &ic.cdr;
+                        }
+                        return Ok(Value::Nil);
+                    } else if qual_name == "as" {
+                        let alias_id = nth_car(&inner.cdr, 0)?.as_symbol().map_err(|_| {
+                            MoofError::runtime("use as: expected symbol alias")
+                        })?;
+                        if let Ok(mod_val) = env.get(name_id) {
+                            env.define(alias_id, mod_val, false);
+                        }
+                        return Ok(Value::Nil);
+                    }
+                }
+            }
+        }
+
+        // Default: import all bindings into current env
+        for (sym_id, val) in &module_bindings {
+            env.define(*sym_id, val.clone(), false);
+        }
+        Ok(Value::Nil)
+    }
+
     // ── type (ADT definitions) ──────────────────────────────────────
 
     fn eval_type_def(&mut self, args: &Value, env: &Env) -> Result<Value> {
@@ -1147,6 +1825,7 @@ impl Interpreter {
             &self.cons_class,
             &self.table_class,
             &self.closure_class,
+            &self.range_class,
             &self.true_class,
             &self.false_class,
             &self.nil_class,
@@ -1250,6 +1929,41 @@ impl Interpreter {
 
             // Cons pattern
             Value::Cons(cell) => {
+                // Check for table pattern: (__table "key" pattern ...)
+                if let Value::Symbol(id) = &cell.car {
+                    if *id == self.known.table {
+                        // Table pattern: match key-value pairs
+                        if let Value::Table(tbl_rc) = value {
+                            let tbl = tbl_rc.borrow();
+                            let pairs = list_to_vec(&cell.cdr);
+                            // Empty pattern (__table) matches any table
+                            if pairs.is_empty() {
+                                return true;
+                            }
+                            // pairs should be alternating key, pattern
+                            let mut i = 0;
+                            while i + 1 < pairs.len() {
+                                let key = match &pairs[i] {
+                                    Value::Str(s) => s.to_string(),
+                                    _ => return false,
+                                };
+                                let pat = &pairs[i + 1];
+                                match tbl.hash.get(&key) {
+                                    Some(val) => {
+                                        if !self.match_pattern(pat, val, env) {
+                                            return false;
+                                        }
+                                    }
+                                    None => return false,
+                                }
+                                i += 2;
+                            }
+                            return true;
+                        }
+                        return false;
+                    }
+                }
+
                 // Check for constructor pattern: (ConstructorName field_patterns...)
                 if let Value::Symbol(ctor_id) = &cell.car {
                     let name = self.symbols.name(*ctor_id);
@@ -1492,7 +2206,69 @@ impl Interpreter {
 // Free functions
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Call a closure with the given arguments.
+/// Set up a call environment for a closure: arity check, param binding, field binding.
+/// Returns the new environment ready for evaluation.
+fn setup_call_env(
+    interp: &Interpreter,
+    closure: &MoofClosure,
+    args: &[Value],
+) -> Result<Env> {
+    let n_params = closure.params.len();
+    let has_rest = closure.rest_param.is_some();
+
+    // Arity check
+    if has_rest {
+        if args.len() < n_params {
+            let name = closure.name.map(|id| interp.symbols.name(id).to_string());
+            return Err(MoofError::arity(
+                &format!("at least {n_params}"),
+                args.len(),
+                name.as_deref(),
+            ));
+        }
+    } else if args.len() != n_params {
+        let name = closure.name.map(|id| interp.symbols.name(id).to_string());
+        return Err(MoofError::arity(
+            &n_params.to_string(),
+            args.len(),
+            name.as_deref(),
+        ));
+    }
+
+    // Create child env from closure's captured env
+    let call_env = closure.env.child();
+
+    // Bind positional params
+    for (i, &param_id) in closure.params.iter().enumerate() {
+        let val = args.get(i).cloned().unwrap_or(Value::Nil);
+        call_env.define(param_id, val, false);
+    }
+
+    // Bind rest param
+    if let Some(rest_id) = closure.rest_param {
+        let rest_items: Vec<Value> = args[n_params..].to_vec();
+        call_env.define(rest_id, Value::from_slice(&rest_items), false);
+    }
+
+    // If first param is `self` and the value is an Object, bind fields
+    if !closure.params.is_empty() && closure.params[0] == interp.known.self_ {
+        if let Some(self_val) = args.first() {
+            if let Value::Object(obj_rc) = self_val {
+                let obj = obj_rc.borrow();
+                let class = obj.class.borrow();
+                for (i, &field_id) in class.field_names.iter().enumerate() {
+                    if let Some(val) = obj.get_field(i) {
+                        call_env.define(field_id, val.clone(), false);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(call_env)
+}
+
+/// Call a closure with the given arguments. Uses a trampoline for TCO.
 pub fn call_closure(
     interp: &mut Interpreter,
     closure: &MoofClosure,
@@ -1501,59 +2277,29 @@ pub fn call_closure(
     match &closure.body {
         ClosureBody::Native(f) => f(interp, args),
         ClosureBody::Expr(body) => {
-            let n_params = closure.params.len();
-            let has_rest = closure.rest_param.is_some();
+            let call_env = setup_call_env(interp, closure, &args)?;
+            let mut result = interp.eval_tail(body, &call_env)?;
 
-            // Arity check
-            if has_rest {
-                if args.len() < n_params {
-                    let name = closure.name.map(|id| interp.symbols.name(id).to_string());
-                    return Err(MoofError::arity(
-                        &format!("at least {n_params}"),
-                        args.len(),
-                        name.as_deref(),
-                    ));
-                }
-            } else if args.len() != n_params {
-                let name = closure.name.map(|id| interp.symbols.name(id).to_string());
-                return Err(MoofError::arity(
-                    &n_params.to_string(),
-                    args.len(),
-                    name.as_deref(),
-                ));
-            }
-
-            // Create child env from closure's captured env
-            let call_env = closure.env.child();
-
-            // Bind positional params
-            for (i, &param_id) in closure.params.iter().enumerate() {
-                let val = args.get(i).cloned().unwrap_or(Value::Nil);
-                call_env.define(param_id, val, false);
-            }
-
-            // Bind rest param
-            if let Some(rest_id) = closure.rest_param {
-                let rest_items: Vec<Value> = args[n_params..].to_vec();
-                call_env.define(rest_id, Value::from_slice(&rest_items), false);
-            }
-
-            // If first param is `self` and the value is an Object, bind fields
-            if !closure.params.is_empty() && closure.params[0] == interp.known.self_ {
-                if let Some(self_val) = args.first() {
-                    if let Value::Object(obj_rc) = self_val {
-                        let obj = obj_rc.borrow();
-                        let class = obj.class.borrow();
-                        for (i, &field_id) in class.field_names.iter().enumerate() {
-                            if let Some(val) = obj.get_field(i) {
-                                call_env.define(field_id, val.clone(), false);
+            // Trampoline loop
+            loop {
+                match result {
+                    Eval::Val(v) => return Ok(v),
+                    Eval::TailCall { func, args: tc_args } => {
+                        match func {
+                            Value::Closure(ref c) => {
+                                match &c.body {
+                                    ClosureBody::Native(f) => return f(interp, tc_args),
+                                    ClosureBody::Expr(body) => {
+                                        let new_env = setup_call_env(interp, c, &tc_args)?;
+                                        result = interp.eval_tail(body, &new_env)?;
+                                    }
+                                }
                             }
+                            _ => return interp.invoke(func, tc_args),
                         }
                     }
                 }
             }
-
-            interp.eval(body, &call_env)
         }
     }
 }

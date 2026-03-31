@@ -7,6 +7,26 @@ use crate::cons::ConsCell;
 use crate::moofint::MoofInt;
 use crate::symbol::SymId;
 
+// ── MoofRange (lazy) ────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct MoofRange {
+    pub start: MoofInt,
+    pub end: MoofInt,   // exclusive
+    pub step: MoofInt,
+}
+
+impl MoofRange {
+    pub fn len(&self) -> i64 {
+        let s = self.start.to_i64().unwrap_or(0);
+        let e = self.end.to_i64().unwrap_or(0);
+        let st = self.step.to_i64().unwrap_or(1);
+        if st == 0 { return 0; }
+        let diff = if st > 0 { e - s } else { s - e };
+        if diff <= 0 { 0 } else { (diff + st.abs() - 1) / st.abs() }
+    }
+}
+
 // ── Core Value enum ──────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -21,6 +41,7 @@ pub enum Value {
     Table(Rc<RefCell<MoofTable>>),
     Object(Rc<RefCell<MoofObject>>),
     Closure(Rc<MoofClosure>),
+    Range(Rc<MoofRange>),
 }
 
 // ── MoofTable ────────────────────────────────────────────────────────
@@ -289,6 +310,7 @@ impl Value {
             Value::Table(_) => "Table",
             Value::Object(_) => "Object",
             Value::Closure(_) => "Closure",
+            Value::Range(_) => "Range",
         }
     }
 
@@ -318,6 +340,7 @@ impl Value {
     pub fn inspect(&self) -> String {
         match self {
             Value::Str(s) => format!("{:?}", &**s),
+            Value::Range(_) => format!("{self}"),
             other => format!("{other}"),
         }
     }
@@ -429,6 +452,14 @@ impl fmt::Display for Value {
                     write!(f, "<lambda/{arity}>")
                 }
             }
+            Value::Range(r) => {
+                let step_i64 = r.step.to_i64().unwrap_or(1);
+                if step_i64 != 1 {
+                    write!(f, "{}..{}:{}", r.start, r.end, r.step)
+                } else {
+                    write!(f, "{}..{}", r.start, r.end)
+                }
+            }
         }
     }
 }
@@ -456,6 +487,9 @@ impl PartialEq for Value {
             (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
             // Closures are not comparable
             (Value::Closure(_), Value::Closure(_)) => false,
+            (Value::Range(a), Value::Range(b)) => {
+                a.start == b.start && a.end == b.end && a.step == b.step
+            }
             _ => false,
         }
     }
@@ -497,6 +531,11 @@ impl Hash for Value {
             Value::Closure(c) => {
                 // Pointer identity
                 (Rc::as_ptr(c) as usize).hash(state);
+            }
+            Value::Range(r) => {
+                r.start.hash(state);
+                r.end.hash(state);
+                r.step.hash(state);
             }
         }
     }

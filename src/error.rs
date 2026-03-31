@@ -6,6 +6,7 @@ pub struct MoofError {
     pub message: String,
     pub line: Option<usize>,
     pub column: Option<usize>,
+    pub error_object: Option<crate::value::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +29,7 @@ impl MoofError {
             message: msg.into(),
             line: Some(line),
             column: Some(col),
+            error_object: None,
         }
     }
 
@@ -37,6 +39,7 @@ impl MoofError {
             message: msg.into(),
             line: None,
             column: None,
+            error_object: None,
         }
     }
 
@@ -46,6 +49,7 @@ impl MoofError {
             message: msg.into(),
             line: None,
             column: None,
+            error_object: None,
         }
     }
 
@@ -55,6 +59,7 @@ impl MoofError {
             message: msg.into(),
             line,
             column: col,
+            error_object: None,
         }
     }
 
@@ -68,6 +73,7 @@ impl MoofError {
             message: msg,
             line: None,
             column: None,
+            error_object: None,
         }
     }
 
@@ -78,6 +84,7 @@ impl MoofError {
             message: format!("Wrong number of arguments{fn_name}: expected {expected}, got {got}"),
             line: None,
             column: None,
+            error_object: None,
         }
     }
 
@@ -87,6 +94,7 @@ impl MoofError {
             message: msg.into(),
             line: None,
             column: None,
+            error_object: None,
         }
     }
 
@@ -96,6 +104,7 @@ impl MoofError {
             message: msg.into(),
             line: None,
             column: None,
+            error_object: None,
         }
     }
 
@@ -107,6 +116,12 @@ impl MoofError {
         if self.column.is_none() {
             self.column = col;
         }
+        self
+    }
+
+    /// Attach a Moof error object to this error.
+    pub fn with_object(mut self, obj: crate::value::Value) -> Self {
+        self.error_object = Some(obj);
         self
     }
 }

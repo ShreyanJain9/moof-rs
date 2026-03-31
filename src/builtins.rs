@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use crate::cons;
@@ -7,7 +8,7 @@ use crate::error::{MoofError, Result};
 use crate::interpreter::Interpreter;
 use crate::moofint::MoofInt;
 use crate::value::{
-    ClosureBody, MoofClass, MoofClosure, MoofTable, NativeFn, Value,
+    ClosureBody, MoofClass, MoofClosure, MoofRange, MoofTable, NativeFn, Value,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -16,6 +17,8 @@ use crate::value::{
 
 pub fn install(interp: &mut Interpreter) {
     install_globals(interp);
+    install_object_methods(interp);
+    install_symbol_methods(interp);
     install_integer_methods(interp);
     install_float_methods(interp);
     install_string_methods(interp);
@@ -24,6 +27,8 @@ pub fn install(interp: &mut Interpreter) {
     install_bool_methods(interp);
     install_nil_methods(interp);
     install_closure_methods(interp);
+    install_error_methods(interp);
+    install_range_methods(interp);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -269,6 +274,9 @@ fn install_globals(interp: &mut Interpreter) {
 
     // Timing
     register(interp, "time", builtin_time);
+
+    // Internal helper for curry
+    register(interp, "__curry_call", builtin_curry_call);
 }
 
 // ── Arithmetic ─────────────────────────────────────────────────────
@@ -486,9 +494,12 @@ fn builtin_apply(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
 
 // ── Control ────────────────────────────────────────────────────────
 
-fn builtin_error(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+fn builtin_error(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
     check_arity("error", 1, &args)?;
-    Err(MoofError::runtime(format!("{}", args[0])))
+    let msg = format!("{}", args[0]);
+    let cls = interp.runtime_error_class.clone();
+    let obj = interp.make_error_object(&cls, &msg);
+    Err(MoofError::runtime(&msg).with_object(obj))
 }
 
 fn builtin_exit(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
@@ -518,25 +529,19 @@ fn builtin_type_of(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value>
 fn builtin_range(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
     let (start, end, step) = match args.len() {
         1 => {
-            let end = args[0].as_int()?.to_i64()
-                .ok_or_else(|| MoofError::type_error("range: integer too large"))?;
-            (0i64, end, 1i64)
+            let end = args[0].as_int()?.clone();
+            (MoofInt::from_i64(0), end, MoofInt::from_i64(1))
         }
         2 => {
-            let start = args[0].as_int()?.to_i64()
-                .ok_or_else(|| MoofError::type_error("range: integer too large"))?;
-            let end = args[1].as_int()?.to_i64()
-                .ok_or_else(|| MoofError::type_error("range: integer too large"))?;
-            (start, end, 1i64)
+            let start = args[0].as_int()?.clone();
+            let end = args[1].as_int()?.clone();
+            (start, end, MoofInt::from_i64(1))
         }
         3 => {
-            let start = args[0].as_int()?.to_i64()
-                .ok_or_else(|| MoofError::type_error("range: integer too large"))?;
-            let end = args[1].as_int()?.to_i64()
-                .ok_or_else(|| MoofError::type_error("range: integer too large"))?;
-            let step = args[2].as_int()?.to_i64()
-                .ok_or_else(|| MoofError::type_error("range: integer too large"))?;
-            if step == 0 {
+            let start = args[0].as_int()?.clone();
+            let end = args[1].as_int()?.clone();
+            let step = args[2].as_int()?.clone();
+            if step == MoofInt::from_i64(0) {
                 return Err(MoofError::runtime("range: step cannot be zero"));
             }
             (start, end, step)
@@ -544,20 +549,7 @@ fn builtin_range(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
         _ => return Err(MoofError::arity("1-3", args.len(), Some("range"))),
     };
 
-    let mut items = Vec::new();
-    let mut i = start;
-    if step > 0 {
-        while i < end {
-            items.push(Value::Integer(MoofInt::from_i64(i)));
-            i += step;
-        }
-    } else {
-        while i > end {
-            items.push(Value::Integer(MoofInt::from_i64(i)));
-            i += step;
-        }
-    }
-    Ok(Value::from_slice(&items))
+    Ok(Value::Range(Rc::new(MoofRange { start, end, step })))
 }
 
 // ── Timing ─────────────────────────────────────────────────────────
@@ -569,6 +561,18 @@ fn builtin_time(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
     let elapsed = t0.elapsed();
     println!("Elapsed: {:.2}ms", elapsed.as_secs_f64() * 1000.0);
     Ok(result)
+}
+
+// ── Internal: curry call helper ──────────────────────────────────────
+// Called as (__curry_call func partial_list rest_list)
+// Concatenates partial_list and rest_list, then invokes func with the combined args.
+fn builtin_curry_call(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    check_arity("__curry_call", 3, &args)?;
+    let func = &args[0];
+    let mut all_args = args[1].to_vec()?;
+    let rest = args[2].to_vec()?;
+    all_args.extend(rest);
+    invoke(interp, func, all_args)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -680,6 +684,109 @@ fn install_integer_methods(interp: &mut Interpreter) {
     });
     register_method(interp, &class, "<=", |_interp, args| {
         Ok(Value::Bool(numeric_lte(&args[0], &args[1])?))
+    });
+
+    // ── ** (alias for pow:) ──────────────────────────────────────────
+    register_method(interp, &class, "**", |_interp, args| {
+        let base = args[0].as_int()?;
+        match &args[1] {
+            Value::Integer(exp) => Ok(Value::Integer(base.pow(exp))),
+            Value::Float(exp) => Ok(Value::Float(base.to_f64().powf(*exp))),
+            _ => Err(MoofError::type_error("**: expects a number argument")),
+        }
+    });
+
+    // ── gcd: ─────────────────────────────────────────────────────────
+    register_method(interp, &class, "gcd:", |_interp, args| {
+        let a = args[0].as_int()?;
+        let b = args[1].as_int()?;
+        Ok(Value::Integer(a.gcd(b)))
+    });
+
+    // ── lcm: ─────────────────────────────────────────────────────────
+    register_method(interp, &class, "lcm:", |_interp, args| {
+        let a = args[0].as_int()?;
+        let b = args[1].as_int()?;
+        let g = a.gcd(b);
+        if g.is_zero() {
+            Ok(Value::Integer(MoofInt::from_i64(0)))
+        } else {
+            // lcm = |a * b| / gcd(a, b)
+            let product = a.clone() * b.clone();
+            let lcm = product / g;
+            Ok(Value::Integer(lcm.abs()))
+        }
+    });
+
+    // ── times: ───────────────────────────────────────────────────────
+    register_method(interp, &class, "times:", |interp, args| {
+        let n = args[0].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("times: integer too large"))?;
+        let func = &args[1];
+        for i in 0..n {
+            invoke(interp, func, vec![Value::Integer(MoofInt::from_i64(i))])?;
+        }
+        Ok(Value::Nil)
+    });
+
+    // ── upto: ────────────────────────────────────────────────────────
+    register_method(interp, &class, "upto:", |_interp, args| {
+        let start = args[0].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("upto: integer too large"))?;
+        let end = args[1].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("upto: integer too large"))?;
+        let items: Vec<Value> = (start..=end)
+            .map(|i| Value::Integer(MoofInt::from_i64(i)))
+            .collect();
+        Ok(Value::from_slice(&items))
+    });
+
+    // ── downto: ──────────────────────────────────────────────────────
+    register_method(interp, &class, "downto:", |_interp, args| {
+        let start = args[0].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("downto: integer too large"))?;
+        let end = args[1].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("downto: integer too large"))?;
+        let items: Vec<Value> = (end..=start)
+            .rev()
+            .map(|i| Value::Integer(MoofInt::from_i64(i)))
+            .collect();
+        Ok(Value::from_slice(&items))
+    });
+
+    // ── between:and: ─────────────────────────────────────────────────
+    register_method(interp, &class, "between:and:", |_interp, args| {
+        let val = &args[0];
+        let lo = &args[1];
+        let hi = &args[2];
+        Ok(Value::Bool(numeric_gte(val, lo)? && numeric_lte(val, hi)?))
+    });
+
+    // ── bit_and: ─────────────────────────────────────────────────────
+    register_method(interp, &class, "bit_and:", |_interp, args| {
+        let a = args[0].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("bit_and: only works on small integers"))?;
+        let b = args[1].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("bit_and: only works on small integers"))?;
+        Ok(Value::Integer(MoofInt::from_i64(a & b)))
+    });
+
+    // ── bit_or: ──────────────────────────────────────────────────────
+    register_method(interp, &class, "bit_or:", |_interp, args| {
+        let a = args[0].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("bit_or: only works on small integers"))?;
+        let b = args[1].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("bit_or: only works on small integers"))?;
+        Ok(Value::Integer(MoofInt::from_i64(a | b)))
+    });
+
+    // ── bit_xor: ─────────────────────────────────────────────────────
+    register_method(interp, &class, "bit_xor:", |_interp, args| {
+        let a = args[0].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("bit_xor: only works on small integers"))?;
+        let b = args[1].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("bit_xor: only works on small integers"))?;
+        Ok(Value::Integer(MoofInt::from_i64(a ^ b)))
     });
 }
 
@@ -801,6 +908,34 @@ fn install_float_methods(interp: &mut Interpreter) {
     });
     register_method(interp, &class, "<=", |_interp, args| {
         Ok(Value::Bool(numeric_lte(&args[0], &args[1])?))
+    });
+
+    // ── ** (alias for pow:) ──────────────────────────────────────────
+    register_method(interp, &class, "**", |_interp, args| {
+        let base = args[0].as_float()?;
+        let exp = args[1].as_number_f64()?;
+        Ok(Value::Float(base.powf(exp)))
+    });
+
+    // ── truncate ─────────────────────────────────────────────────────
+    register_method(interp, &class, "truncate", |_interp, args| {
+        let n = args[0].as_float()?;
+        Ok(Value::Float(n.trunc()))
+    });
+
+    // ── finite? ──────────────────────────────────────────────────────
+    register_method(interp, &class, "finite?", |_interp, args| {
+        let n = args[0].as_float()?;
+        Ok(Value::Bool(n.is_finite()))
+    });
+
+    // ── round: (round to N decimal places) ───────────────────────────
+    register_method(interp, &class, "round:", |_interp, args| {
+        let n = args[0].as_float()?;
+        let precision = args[1].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("round: precision too large"))?;
+        let factor = 10f64.powi(precision as i32);
+        Ok(Value::Float((n * factor).round() / factor))
     });
 }
 
@@ -933,6 +1068,85 @@ fn install_string_methods(interp: &mut Interpreter) {
         let result: String = s.chars().skip(start).take(len).collect();
         Ok(Value::Str(Rc::from(result.as_str())))
     });
+
+    // ── capitalize ───────────────────────────────────────────────────
+    register_method(interp, &class, "capitalize", |_interp, args| {
+        let s = args[0].as_str()?;
+        let mut chars = s.chars();
+        let result = match chars.next() {
+            None => String::new(),
+            Some(first) => {
+                let mut r = first.to_uppercase().to_string();
+                r.extend(chars.map(|c| c.to_lowercase().next().unwrap_or(c)));
+                r
+            }
+        };
+        Ok(Value::Str(Rc::from(result.as_str())))
+    });
+
+    // ── strip (alias for trim) ───────────────────────────────────────
+    register_method(interp, &class, "strip", |_interp, args| {
+        let s = args[0].as_str()?;
+        Ok(Value::Str(Rc::from(s.trim())))
+    });
+
+    // ── index_of: ────────────────────────────────────────────────────
+    register_method(interp, &class, "index_of:", |_interp, args| {
+        let s = args[0].as_str()?;
+        let needle = args[1].as_str()?;
+        match s.find(needle) {
+            Some(byte_idx) => {
+                // Convert byte index to char index
+                let char_idx = s[..byte_idx].chars().count() as i64;
+                Ok(Value::Integer(MoofInt::from_i64(char_idx)))
+            }
+            None => Ok(Value::Integer(MoofInt::from_i64(-1))),
+        }
+    });
+
+    // ── to_sym ───────────────────────────────────────────────────────
+    register_method(interp, &class, "to_sym", |interp, args| {
+        let s = args[0].as_str()?;
+        let id = interp.symbols.intern(s);
+        Ok(Value::Symbol(id))
+    });
+
+    // ── each_char: ───────────────────────────────────────────────────
+    register_method(interp, &class, "each_char:", |interp, args| {
+        let s = args[0].as_str()?.to_string();
+        let func = &args[1];
+        for c in s.chars() {
+            invoke(interp, func, vec![Value::Str(Rc::from(c.to_string().as_str()))])?;
+        }
+        Ok(Value::Nil)
+    });
+
+    // ── each_line: ───────────────────────────────────────────────────
+    register_method(interp, &class, "each_line:", |interp, args| {
+        let s = args[0].as_str()?.to_string();
+        let func = &args[1];
+        for line in s.split('\n') {
+            invoke(interp, func, vec![Value::Str(Rc::from(line))])?;
+        }
+        Ok(Value::Nil)
+    });
+
+    // ── * (repeat string N times) ────────────────────────────────────
+    register_method(interp, &class, "*", |_interp, args| {
+        let s = args[0].as_str()?;
+        let n = args[1].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("*: count too large"))? as usize;
+        Ok(Value::Str(Rc::from(s.repeat(n).as_str())))
+    });
+
+    // ── bytes ────────────────────────────────────────────────────────
+    register_method(interp, &class, "bytes", |_interp, args| {
+        let s = args[0].as_str()?;
+        let byte_vals: Vec<Value> = s.bytes()
+            .map(|b| Value::Integer(MoofInt::from_i64(b as i64)))
+            .collect();
+        Ok(Value::from_slice(&byte_vals))
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -948,6 +1162,10 @@ fn install_cons_methods(interp: &mut Interpreter) {
 
     register_method(interp, &class, "cdr", |_interp, args| {
         args[0].cdr().cloned()
+    });
+
+    register_method(interp, &class, "empty?", |_interp, _args| {
+        Ok(Value::Bool(false)) // a cons cell is never empty
     });
 
     register_method(interp, &class, "length", |_interp, args| {
@@ -1136,6 +1354,64 @@ fn install_cons_methods(interp: &mut Interpreter) {
             acc = invoke(interp, func, vec![acc, item])?;
         }
         Ok(acc)
+    });
+
+    // ── sort_by: ─────────────────────────────────────────────────────
+    register_method(interp, &class, "sort_by:", |interp, args| {
+        let items = cons::cons_to_vec(&args[0]);
+        let func = &args[1];
+        // Compute keys for each element
+        let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+        for item in items {
+            let key = invoke(interp, func, vec![item.clone()])?;
+            keyed.push((key, item));
+        }
+        keyed.sort_by(|(ka, _), (kb, _)| {
+            match (ka.as_number_f64(), kb.as_number_f64()) {
+                (Ok(x), Ok(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                _ => {
+                    // Fall back to string comparison
+                    format!("{ka}").cmp(&format!("{kb}"))
+                }
+            }
+        });
+        let sorted: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+        Ok(cons::vec_to_cons(&sorted))
+    });
+
+    // ── uniq ─────────────────────────────────────────────────────────
+    register_method(interp, &class, "uniq", |_interp, args| {
+        let items = cons::cons_to_vec(&args[0]);
+        let mut seen = Vec::new();
+        let mut result = Vec::new();
+        for item in items {
+            if !seen.iter().any(|s: &Value| s == &item) {
+                seen.push(item.clone());
+                result.push(item);
+            }
+        }
+        Ok(cons::vec_to_cons(&result))
+    });
+
+    // ── nth: (alias for at:) ─────────────────────────────────────────
+    register_method(interp, &class, "nth:", |_interp, args| {
+        let items = cons::cons_to_vec(&args[0]);
+        let idx = args[1].as_int()?.to_i64()
+            .ok_or_else(|| MoofError::type_error("nth: index too large"))? as usize;
+        Ok(items.get(idx).cloned().unwrap_or(Value::Nil))
+    });
+
+    // ── append: ──────────────────────────────────────────────────────
+    register_method(interp, &class, "append:", |_interp, args| {
+        let mut items = cons::cons_to_vec(&args[0]);
+        let other = cons::cons_to_vec(&args[1]);
+        items.extend(other);
+        Ok(cons::vec_to_cons(&items))
+    });
+
+    // ── cons: (prepend an element) ───────────────────────────────────
+    register_method(interp, &class, "cons:", |_interp, args| {
+        Ok(Value::cons(args[1].clone(), args[0].clone()))
     });
 }
 
@@ -1379,6 +1655,217 @@ fn install_table_methods(interp: &mut Interpreter) {
             _ => Err(MoofError::type_error("filter: expected Table")),
         }
     });
+
+    // ── shift ────────────────────────────────────────────────────────
+    register_method(interp, &class, "shift", |_interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let mut t = tbl.borrow_mut();
+                if t.array.is_empty() {
+                    Ok(Value::Nil)
+                } else {
+                    Ok(t.array.remove(0))
+                }
+            }
+            _ => Err(MoofError::type_error("shift: expected Table")),
+        }
+    });
+
+    // ── unshift: ─────────────────────────────────────────────────────
+    register_method(interp, &class, "unshift:", |_interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                tbl.borrow_mut().array.insert(0, args[1].clone());
+                Ok(args[0].clone())
+            }
+            _ => Err(MoofError::type_error("unshift: expected Table")),
+        }
+    });
+
+    // ── compact ──────────────────────────────────────────────────────
+    register_method(interp, &class, "compact", |_interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let mut new_tbl = MoofTable::new();
+                {
+                    let t = tbl.borrow();
+                    for v in &t.array {
+                        if !v.is_nil() {
+                            new_tbl.array.push(v.clone());
+                        }
+                    }
+                    for (k, v) in &t.hash {
+                        if !v.is_nil() {
+                            new_tbl.hash.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                Ok(Value::Table(Rc::new(RefCell::new(new_tbl))))
+            }
+            _ => Err(MoofError::type_error("compact: expected Table")),
+        }
+    });
+
+    // ── find: ────────────────────────────────────────────────────────
+    register_method(interp, &class, "find:", |interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let func = &args[1];
+                let array: Vec<Value> = tbl.borrow().array.clone();
+                for v in array {
+                    if invoke(interp, func, vec![v.clone()])?.is_truthy() {
+                        return Ok(v);
+                    }
+                }
+                Ok(Value::Nil)
+            }
+            _ => Err(MoofError::type_error("find: expected Table")),
+        }
+    });
+
+    // ── count: ───────────────────────────────────────────────────────
+    register_method(interp, &class, "count:", |interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let func = &args[1];
+                let array: Vec<Value> = tbl.borrow().array.clone();
+                let mut count = 0i64;
+                for v in array {
+                    if invoke(interp, func, vec![v])?.is_truthy() {
+                        count += 1;
+                    }
+                }
+                Ok(Value::Integer(MoofInt::from_i64(count)))
+            }
+            _ => Err(MoofError::type_error("count: expected Table")),
+        }
+    });
+
+    // ── entries ──────────────────────────────────────────────────────
+    register_method(interp, &class, "entries", |_interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let t = tbl.borrow();
+                let mut pairs = Vec::new();
+                for (k, v) in &t.hash {
+                    let pair = Value::from_slice(&[
+                        Value::Str(Rc::from(k.as_str())),
+                        v.clone(),
+                    ]);
+                    pairs.push(pair);
+                }
+                Ok(Value::from_slice(&pairs))
+            }
+            _ => Err(MoofError::type_error("entries: expected Table")),
+        }
+    });
+
+    // ── has_value: ───────────────────────────────────────────────────
+    register_method(interp, &class, "has_value:", |_interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let t = tbl.borrow();
+                let needle = &args[1];
+                for v in &t.array {
+                    if v == needle {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                for v in t.hash.values() {
+                    if v == needle {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+                Ok(Value::Bool(false))
+            }
+            _ => Err(MoofError::type_error("has_value: expected Table")),
+        }
+    });
+
+    // ── each_pair: ───────────────────────────────────────────────────
+    register_method(interp, &class, "each_pair:", |interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let func = &args[1];
+                let entries: Vec<(String, Value)> = tbl
+                    .borrow()
+                    .hash
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                for (k, v) in entries {
+                    invoke(interp, func, vec![Value::Str(Rc::from(k.as_str())), v])?;
+                }
+                Ok(Value::Nil)
+            }
+            _ => Err(MoofError::type_error("each_pair: expected Table")),
+        }
+    });
+
+    // ── each_with_index: ─────────────────────────────────────────────
+    register_method(interp, &class, "each_with_index:", |interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let func = &args[1];
+                let array: Vec<Value> = tbl.borrow().array.clone();
+                for (i, v) in array.into_iter().enumerate() {
+                    invoke(interp, func, vec![v, Value::Integer(MoofInt::from_i64(i as i64))])?;
+                }
+                Ok(Value::Nil)
+            }
+            _ => Err(MoofError::type_error("each_with_index: expected Table")),
+        }
+    });
+
+    // ── select: (alias for filter on hash, predicate receives key, value) ──
+    register_method(interp, &class, "select:", |interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let func = &args[1];
+                let mut new_tbl = MoofTable::new();
+                {
+                    let t = tbl.borrow();
+                    for v in &t.array {
+                        if invoke(interp, func, vec![v.clone()])?.is_truthy() {
+                            new_tbl.array.push(v.clone());
+                        }
+                    }
+                    for (k, v) in &t.hash {
+                        if invoke(interp, func, vec![Value::Str(Rc::from(k.as_str())), v.clone()])?.is_truthy() {
+                            new_tbl.hash.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                Ok(Value::Table(Rc::new(RefCell::new(new_tbl))))
+            }
+            _ => Err(MoofError::type_error("select: expected Table")),
+        }
+    });
+
+    // ── reject: (opposite of select) ─────────────────────────────────
+    register_method(interp, &class, "reject:", |interp, args| {
+        match &args[0] {
+            Value::Table(tbl) => {
+                let func = &args[1];
+                let mut new_tbl = MoofTable::new();
+                {
+                    let t = tbl.borrow();
+                    for v in &t.array {
+                        if !invoke(interp, func, vec![v.clone()])?.is_truthy() {
+                            new_tbl.array.push(v.clone());
+                        }
+                    }
+                    for (k, v) in &t.hash {
+                        if !invoke(interp, func, vec![Value::Str(Rc::from(k.as_str())), v.clone()])?.is_truthy() {
+                            new_tbl.hash.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                Ok(Value::Table(Rc::new(RefCell::new(new_tbl))))
+            }
+            _ => Err(MoofError::type_error("reject: expected Table")),
+        }
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1432,6 +1919,14 @@ fn install_nil_methods(interp: &mut Interpreter) {
         Ok(Value::Bool(true))
     });
 
+    register_method(interp, &class, "empty?", |_interp, _args| {
+        Ok(Value::Bool(true)) // nil is the empty list
+    });
+
+    register_method(interp, &class, "length", |_interp, _args| {
+        Ok(Value::Integer(MoofInt::from_i64(0)))
+    });
+
     register_method(interp, &class, "to_s", |_interp, _args| {
         Ok(Value::Str(Rc::from("nil")))
     });
@@ -1471,5 +1966,412 @@ fn install_closure_methods(interp: &mut Interpreter) {
 
     register_method(interp, &class, "to_s", |_interp, args| {
         Ok(Value::Str(Rc::from(format!("{}", args[0]).as_str())))
+    });
+
+    // ── curry: (partial application) ─────────────────────────────────
+    // Returns a new closure that captures the given partial args and,
+    // when called with remaining args, invokes the original function
+    // with partial_args ++ new_args.
+    register_method(interp, &class, "curry:", |interp, args| {
+        let func = args[0].clone();
+        let partial_args: Vec<Value> = args[1..].to_vec();
+
+        // Intern symbols we'll use in the env and AST body
+        let fn_sym = interp.symbols.intern("__curry_fn");
+        let partial_sym = interp.symbols.intern("__curry_partial");
+        let rest_sym = interp.symbols.intern("__curry_rest");
+        let curry_call_sym = interp.symbols.intern("__curry_call");
+
+        // Build a closure env that captures the original function and partial args
+        let curry_env = interp.global_env.child();
+        curry_env.define(fn_sym, func, false);
+        curry_env.define(partial_sym, Value::from_slice(&partial_args), false);
+
+        // Build the AST body: (__curry_call __curry_fn __curry_partial __curry_rest)
+        let body = Value::from_slice(&[
+            Value::Symbol(curry_call_sym),
+            Value::Symbol(fn_sym),
+            Value::Symbol(partial_sym),
+            Value::Symbol(rest_sym),
+        ]);
+
+        Ok(Value::Closure(Rc::new(MoofClosure {
+            name: Some(interp.symbols.intern("<curried>")),
+            params: vec![],
+            rest_param: Some(rest_sym),
+            body: ClosureBody::Expr(body),
+            env: curry_env,
+        })))
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Object methods (inherited by all types via superclass chain)
+// ═══════════════════════════════════════════════════════════════════════
+
+fn install_object_methods(interp: &mut Interpreter) {
+    let class = interp.object_class.clone();
+
+    register_method(interp, &class, "class", |interp, args| {
+        let cls = interp.class_of(&args[0]);
+        let name_id = cls.borrow().name;
+        Ok(Value::Str(Rc::from(interp.symbols.name(name_id))))
+    });
+
+    register_method(interp, &class, "to_s", |_interp, args| {
+        Ok(Value::Str(Rc::from(format!("{}", args[0]).as_str())))
+    });
+
+    register_method(interp, &class, "inspect", |_interp, args| {
+        Ok(Value::Str(Rc::from(args[0].inspect().as_str())))
+    });
+
+    register_method(interp, &class, "nil?", |_interp, _args| {
+        Ok(Value::Bool(false))
+    });
+
+    register_method(interp, &class, "is_a:", |interp, args| {
+        let target_name = match &args[1] {
+            Value::Str(s) => s.to_string(),
+            Value::Symbol(id) => interp.symbols.name(*id).to_string(),
+            _ => return Err(MoofError::type_error("is_a: expects a class name (String or Symbol)")),
+        };
+        let mut current = interp.class_of(&args[0]);
+        loop {
+            let name_id = current.borrow().name;
+            if interp.symbols.name(name_id) == target_name {
+                return Ok(Value::Bool(true));
+            }
+            let sup = current.borrow().superclass.clone();
+            match sup {
+                Some(parent) => current = parent,
+                None => return Ok(Value::Bool(false)),
+            }
+        }
+    });
+
+    register_method(interp, &class, "responds_to:", |interp, args| {
+        let selector_name = match &args[1] {
+            Value::Str(s) => s.to_string(),
+            Value::Symbol(id) => interp.symbols.name(*id).to_string(),
+            _ => return Err(MoofError::type_error("responds_to: expects a selector name (String or Symbol)")),
+        };
+        let selector_id = interp.symbols.intern(&selector_name);
+        let cls = interp.class_of(&args[0]);
+        Ok(Value::Bool(cls.borrow().lookup(selector_id).is_some()))
+    });
+
+    register_method(interp, &class, "==", |_interp, args| {
+        Ok(Value::Bool(args[0] == args[1]))
+    });
+
+    register_method(interp, &class, "!=", |_interp, args| {
+        Ok(Value::Bool(args[0] != args[1]))
+    });
+
+    register_method(interp, &class, "hash", |_interp, args| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        args[0].hash(&mut hasher);
+        let h = hasher.finish() as i64;
+        Ok(Value::Integer(MoofInt::from_i64(h)))
+    });
+
+    register_method(interp, &class, "send:", |interp, args| {
+        let receiver = args[0].clone();
+        let selector_name = match &args[1] {
+            Value::Str(s) => s.to_string(),
+            Value::Symbol(id) => interp.symbols.name(*id).to_string(),
+            _ => return Err(MoofError::type_error("send: expects a selector name (String or Symbol)")),
+        };
+        let selector_id = interp.symbols.intern(&selector_name);
+        let msg_args = if args.len() > 2 {
+            args[2..].to_vec()
+        } else {
+            vec![]
+        };
+        interp.send_message(receiver, selector_id, msg_args)
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Symbol methods
+// ═══════════════════════════════════════════════════════════════════════
+
+fn install_symbol_methods(interp: &mut Interpreter) {
+    let class = interp.symbol_class.clone();
+
+    register_method(interp, &class, "to_s", |interp, args| {
+        let id = args[0].as_symbol()?;
+        Ok(Value::Str(Rc::from(interp.symbols.name(id))))
+    });
+
+    register_method(interp, &class, "to_sym", |_interp, args| {
+        Ok(args[0].clone())
+    });
+
+    register_method(interp, &class, "inspect", |interp, args| {
+        let id = args[0].as_symbol()?;
+        Ok(Value::Str(Rc::from(format!(":{}", interp.symbols.name(id)).as_str())))
+    });
+
+    register_method(interp, &class, "length", |interp, args| {
+        let id = args[0].as_symbol()?;
+        let len = interp.symbols.name(id).len() as i64;
+        Ok(Value::Integer(MoofInt::from_i64(len)))
+    });
+
+    register_method(interp, &class, "nil?", |_interp, _args| {
+        Ok(Value::Bool(false))
+    });
+
+    register_method(interp, &class, "class", |_interp, _args| {
+        Ok(Value::Str(Rc::from("Symbol")))
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Error methods
+// ═══════════════════════════════════════════════════════════════════════
+
+fn install_error_methods(interp: &mut Interpreter) {
+    let class = interp.error_class.clone();
+
+    // message — return the message field (field 0)
+    register_method(interp, &class, "message", |_interp, args| {
+        if let Value::Object(ref obj) = args[0] {
+            let obj = obj.borrow();
+            if let Some(msg) = obj.fields.get(0) {
+                return Ok(msg.clone());
+            }
+        }
+        Ok(Value::Str(Rc::from("")))
+    });
+
+    // to_s — format as "ClassName: message"
+    register_method(interp, &class, "to_s", |interp, args| {
+        if let Value::Object(ref obj) = args[0] {
+            let obj = obj.borrow();
+            let class_name = {
+                let cls = obj.class.borrow();
+                interp.symbols.name(cls.name).to_string()
+            };
+            let msg = obj.fields.get(0)
+                .map(|v| format!("{}", v))
+                .unwrap_or_default();
+            Ok(Value::Str(Rc::from(format!("{}: {}", class_name, msg).as_str())))
+        } else {
+            Ok(Value::Str(Rc::from("Error")))
+        }
+    });
+
+    // inspect — same as to_s
+    register_method(interp, &class, "inspect", |interp, args| {
+        if let Value::Object(ref obj) = args[0] {
+            let obj = obj.borrow();
+            let class_name = {
+                let cls = obj.class.borrow();
+                interp.symbols.name(cls.name).to_string()
+            };
+            let msg = obj.fields.get(0)
+                .map(|v| format!("{}", v))
+                .unwrap_or_default();
+            Ok(Value::Str(Rc::from(format!("{}: {}", class_name, msg).as_str())))
+        } else {
+            Ok(Value::Str(Rc::from("Error")))
+        }
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Range methods
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Helper: iterate a MoofRange, calling f for each element.
+fn range_foreach(r: &MoofRange, mut f: impl FnMut(i64) -> Result<()>) -> Result<()> {
+    let start = r.start.to_i64().ok_or_else(|| MoofError::type_error("range: integer too large"))?;
+    let end = r.end.to_i64().ok_or_else(|| MoofError::type_error("range: integer too large"))?;
+    let step = r.step.to_i64().ok_or_else(|| MoofError::type_error("range: integer too large"))?;
+    let mut i = start;
+    if step > 0 {
+        while i < end {
+            f(i)?;
+            i += step;
+        }
+    } else if step < 0 {
+        while i > end {
+            f(i)?;
+            i += step;
+        }
+    }
+    Ok(())
+}
+
+fn install_range_methods(interp: &mut Interpreter) {
+    let class = interp.range_class.clone();
+
+    // each: — iterate, calling closure for each value
+    register_method(interp, &class, "each:", |interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("each: expects Range receiver")),
+        };
+        let func = &args[1];
+        range_foreach(&r, |i| {
+            interp.invoke(func.clone(), vec![Value::Integer(MoofInt::from_i64(i))])?;
+            Ok(())
+        })?;
+        Ok(Value::Nil)
+    });
+
+    // map: — collect results of applying closure to each value
+    register_method(interp, &class, "map:", |interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("map: expects Range receiver")),
+        };
+        let func = &args[1];
+        let mut results = Vec::new();
+        range_foreach(&r, |i| {
+            let val = interp.invoke(func.clone(), vec![Value::Integer(MoofInt::from_i64(i))])?;
+            results.push(val);
+            Ok(())
+        })?;
+        Ok(cons::vec_to_cons(&results))
+    });
+
+    // filter: — collect values matching predicate
+    register_method(interp, &class, "filter:", |interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("filter: expects Range receiver")),
+        };
+        let func = &args[1];
+        let mut results = Vec::new();
+        range_foreach(&r, |i| {
+            let v = Value::Integer(MoofInt::from_i64(i));
+            let test = interp.invoke(func.clone(), vec![v.clone()])?;
+            if test.is_truthy() {
+                results.push(v);
+            }
+            Ok(())
+        })?;
+        Ok(cons::vec_to_cons(&results))
+    });
+
+    // to_list — convert to cons list (eager)
+    register_method(interp, &class, "to_list", |_interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("to_list expects Range receiver")),
+        };
+        let mut items = Vec::new();
+        range_foreach(&r, |i| {
+            items.push(Value::Integer(MoofInt::from_i64(i)));
+            Ok(())
+        })?;
+        Ok(cons::vec_to_cons(&items))
+    });
+
+    // contains: — check if value is in range
+    register_method(interp, &class, "contains:", |_interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("contains: expects Range receiver")),
+        };
+        let val = args[1].as_int()?;
+        let v = val.to_i64().ok_or_else(|| MoofError::type_error("contains: integer too large"))?;
+        let start = r.start.to_i64().unwrap_or(0);
+        let end = r.end.to_i64().unwrap_or(0);
+        let step = r.step.to_i64().unwrap_or(1);
+        let in_range = if step > 0 {
+            v >= start && v < end && (v - start) % step == 0
+        } else if step < 0 {
+            v <= start && v > end && (start - v) % (-step) == 0
+        } else {
+            false
+        };
+        Ok(Value::Bool(in_range))
+    });
+
+    // size / length — number of elements
+    register_method(interp, &class, "size", |_interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("size expects Range receiver")),
+        };
+        Ok(Value::Integer(MoofInt::from_i64(r.len())))
+    });
+
+    register_method(interp, &class, "length", |_interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("length expects Range receiver")),
+        };
+        Ok(Value::Integer(MoofInt::from_i64(r.len())))
+    });
+
+    // first — start value
+    register_method(interp, &class, "first", |_interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("first expects Range receiver")),
+        };
+        Ok(Value::Integer(r.start.clone()))
+    });
+
+    // last — end - step value (last element in the range)
+    register_method(interp, &class, "last", |_interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("last expects Range receiver")),
+        };
+        let len = r.len();
+        if len == 0 {
+            return Ok(Value::Nil);
+        }
+        let start = r.start.to_i64().unwrap_or(0);
+        let step = r.step.to_i64().unwrap_or(1);
+        let last = start + step * (len - 1);
+        Ok(Value::Integer(MoofInt::from_i64(last)))
+    });
+
+    // reverse — Range with reversed direction
+    register_method(interp, &class, "reverse", |_interp, args| {
+        let r = match &args[0] {
+            Value::Range(r) => r.clone(),
+            _ => return Err(MoofError::type_error("reverse expects Range receiver")),
+        };
+        let len = r.len();
+        if len == 0 {
+            return Ok(Value::Range(Rc::new(MoofRange {
+                start: r.end.clone(),
+                end: r.start.clone(),
+                step: MoofInt::from_i64(-r.step.to_i64().unwrap_or(1)),
+            })));
+        }
+        let start = r.start.to_i64().unwrap_or(0);
+        let step = r.step.to_i64().unwrap_or(1);
+        let last = start + step * (len - 1);
+        let new_end = start - step; // exclusive end of reversed
+        Ok(Value::Range(Rc::new(MoofRange {
+            start: MoofInt::from_i64(last),
+            end: MoofInt::from_i64(new_end),
+            step: MoofInt::from_i64(-step),
+        })))
+    });
+
+    // to_s — display format
+    register_method(interp, &class, "to_s", |_interp, args| {
+        Ok(Value::Str(Rc::from(format!("{}", args[0]).as_str())))
+    });
+
+    // class — "Range"
+    register_method(interp, &class, "class", |_interp, _args| {
+        Ok(Value::Str(Rc::from("Range")))
+    });
+
+    // nil? — false
+    register_method(interp, &class, "nil?", |_interp, _args| {
+        Ok(Value::Bool(false))
     });
 }

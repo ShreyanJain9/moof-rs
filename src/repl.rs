@@ -500,7 +500,7 @@ fn cmd_methods(interp: &mut Interpreter, arg: &str) {
 
 fn cmd_classes(interp: &Interpreter) {
     let builtin_names = [
-        "Integer", "Float", "String", "Cons", "Table", "Bool", "True", "False", "Nil", "Closure",
+        "Integer", "Float", "String", "Cons", "Table", "Bool", "True", "False", "Nil", "Closure", "Range",
     ];
 
     let mut builtin_list = Vec::new();
