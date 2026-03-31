@@ -485,6 +485,38 @@ Remaining benchmarks (Points, Shapes) crash on stack overflow because TCO is not
 
 The map 10k regression is due to the `execute_bytecode` interop path: when native `map:` invokes a compiled block, the mini-executor has overhead from being a flat function (no persistent frame stack). This will improve when more of the stdlib is compiled to bytecode.
 
+### Phase 3: Upvalue Capture
+
+Closures that capture outer variables now work in the bytecode VM. The compiler walks enclosing scopes to find captured variables, marks them as `is_captured`, and emits `GetUpvalue`/`SetUpvalue` opcodes. `MakeClosure` bytecode carries upvalue descriptors that the VM reads to capture values from the enclosing frame. Upvalues are `Rc<RefCell<Value>>` cells, enabling mutable shared state between closures.
+
+Key bug found and fixed: `dispatch_tail_call` was reusing frames without updating the `upvalues` field, causing panics when tail-calling closures with captured variables.
+
+```moof
+;; Mutable closure state works
+(define (make-counter)
+  (define count 0)
+  (lambda ()
+    (set! count (+ count 1))
+    count))
+(define c (make-counter))
+(c) ; => 1
+(c) ; => 2
+(c) ; => 3
+```
+
+### Final session benchmark (single run)
+
+| Benchmark | Tree-walker | Bytecode VM | Speedup |
+|-----------|-----------|-------------|---------|
+| fib(30) | 1907ms | **1418ms** | **26%** |
+| map 10k | 4.36ms | **2.77ms** | **36%** |
+| 5k Points create | 8.21ms | **5.25ms** | **36%** |
+| 5k Point.sum | 7.36ms | **5.60ms** | **24%** |
+| 5k Shapes create | 11.14ms | **8.17ms** | **27%** |
+| 5k area matches | 4.56ms | **4.41ms** | **3%** |
+
+All 6 example files produce identical output between tree-walker and bytecode VM.
+
 ---
 
 ## Final state
