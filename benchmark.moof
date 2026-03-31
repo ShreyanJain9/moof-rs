@@ -1,0 +1,66 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Moof Benchmark Suite
+;; Run: cargo run --release -- benchmark.moof
+;; ═══════════════════════════════════════════════════════════════════════
+
+(print "=== Moof Benchmark Suite ===")
+(print "")
+
+;; ── 1. Fibonacci(30) — pure recursion, function call overhead ────────
+
+(define (fib n)
+  (if (<= n 1) n
+    (+ (fib (- n 1)) (fib (- n 2)))))
+
+(print "1. fib(30):")
+(define fib-result (time (lambda () (fib 30))))
+(print $"   result = \(fib-result)")
+(print "")
+
+;; ── 2. Map 10k — message sends + closures ───────────────────────────
+
+(print "2. map 10k squares:")
+(define map-result (time (lambda () [(range 10000) map: { |x| (* x x) }])))
+(print $"   length = \([map-result length])")
+(print "")
+
+;; ── 3. Object creation + message sends ───────────────────────────────
+
+(class Point
+  (fields x y)
+  (method sum () (+ x y)))
+
+(define (make-points n acc)
+  (if (<= n 0) acc
+    (make-points (- n 1) (cons (Point n (* n 2)) acc))))
+
+(print "3. 5k Points create:")
+(define points (time (lambda () (make-points 5000 (list)))))
+(print "   5k Point.sum via map+reduce:")
+(define point-sum (time (lambda () [(map &sum points) reduce: + init: 0])))
+(print $"   sum = \(point-sum)")
+(print "")
+
+;; ── 4. Pattern matching on ADTs ──────────────────────────────────────
+
+(type Shape
+  (Circle radius)
+  (Rect width height))
+
+(define (area shape)
+  (match shape
+    ((Circle r) (* 3.14159 (* r r)))
+    ((Rect w h) (* w h))))
+
+(define (make-shapes n acc)
+  (if (<= n 0) acc
+    (make-shapes (- n 1) (cons (if (even? n) (Circle n) (Rect n (+ n 1))) acc))))
+
+(print "4. 5k Shape ADT create:")
+(define shapes (time (lambda () (make-shapes 5000 (list)))))
+(print "   5k area matches:")
+(define total-area (time (lambda () (reduce + 0 (map area shapes)))))
+(print $"   total area = \([total-area to_i])")
+(print "")
+
+(print "=== Done ===")

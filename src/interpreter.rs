@@ -58,6 +58,10 @@ pub struct Interpreter {
     pub io_error_class: Rc<RefCell<MoofClass>>,
 
     pub source_locs: HashMap<usize, (usize, usize)>,
+
+    /// Set by send_message before calling a method, so setup_call_env can
+    /// bind __current_class for super sends.
+    pub current_method_class: Option<Rc<RefCell<MoofClass>>>,
 }
 
 impl Interpreter {
@@ -264,6 +268,7 @@ impl Interpreter {
             message_error_class,
             io_error_class,
             source_locs: HashMap::new(),
+            current_method_class: None,
         };
 
         // Install built-in functions
@@ -484,6 +489,9 @@ impl Interpreter {
                     if id == k.send {
                         return self.eval_send(cdr, env);
                     }
+                    if id == k.super_send {
+                        return self.eval_super_send(cdr, env);
+                    }
                     if id == k.table {
                         return self.eval_table(cdr, env);
                     }
@@ -595,6 +603,7 @@ impl Interpreter {
                         || id == k.defmacro
                         || id == k.require
                         || id == k.send
+                        || id == k.super_send
                         || id == k.table
                         || id == k.table_array
                         || id == k.str_interp
@@ -882,7 +891,7 @@ impl Interpreter {
                     env: env.clone(),
                 });
                 let val = Value::Closure(closure);
-                env.define(name_id, val.clone(), false);
+                env.define(name_id, val.clone(), true);
                 Ok(val)
             }
             // (define name value)
@@ -897,7 +906,7 @@ impl Interpreter {
                         val = Value::Closure(Rc::new(named));
                     }
                 }
-                env.define(*name_id, val.clone(), false);
+                env.define(*name_id, val.clone(), true);
                 Ok(val)
             }
             _ => Err(MoofError::runtime(
@@ -963,6 +972,22 @@ impl Interpreter {
         })?;
         let val_expr = nth_car(args, 1)?;
         let val = self.eval(val_expr, env)?;
+
+        // If we're inside a method (self is bound) and the variable is a field,
+        // also update the object's actual field so mutations persist.
+        if let Ok(self_val) = env.get(self.known.self_) {
+            if let Value::Object(ref obj_rc) = self_val {
+                let obj = obj_rc.borrow();
+                let class = obj.class.borrow();
+                let all_fields = class.all_field_names();
+                if let Some(idx) = all_fields.iter().position(|&n| n == name_id) {
+                    drop(class);
+                    drop(obj);
+                    obj_rc.borrow_mut().set_field(idx, val.clone());
+                }
+            }
+        }
+
         env.set(name_id, val)
     }
 
@@ -1211,6 +1236,76 @@ impl Interpreter {
         self.send_message(receiver, selector_id, msg_args)
     }
 
+    // ── __super-send ─────────────────────────────────────────────────
+
+    fn eval_super_send(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        // __super-send is like __send but starts method lookup from the superclass
+        // of the class where the current method is defined.
+        let selector_expr = nth_car(args, 1)?;
+        let selector_id = match selector_expr {
+            Value::Str(s) => self.symbols.intern(s),
+            Value::Symbol(id) => *id,
+            other => {
+                let evaled = self.eval(other, env)?;
+                match &evaled {
+                    Value::Str(s) => self.symbols.intern(s),
+                    Value::Symbol(id) => *id,
+                    _ => return Err(MoofError::runtime("super send: selector must be a string or symbol")),
+                }
+            }
+        };
+
+        // Get `self` from the environment (super sends use the same receiver)
+        let receiver = env.get(self.known.self_).map_err(|_| {
+            MoofError::runtime("super send: can only be used inside a method")
+        })?;
+
+        // Get __current_class to find which class the current method belongs to
+        let current_class_val = env.get(self.known.__current_class).map_err(|_| {
+            MoofError::runtime("super send: can only be used inside a method")
+        })?;
+
+        // __current_class is stored as an Object whose .class IS the defining class
+        let defining_class = if let Value::Object(ref obj_rc) = current_class_val {
+            obj_rc.borrow().class.clone()
+        } else {
+            return Err(MoofError::runtime("super send: invalid __current_class"));
+        };
+
+        // Start lookup from the superclass of the defining class
+        let superclass = defining_class.borrow().superclass.clone();
+        let method = superclass
+            .as_ref()
+            .and_then(|sup| sup.borrow().lookup_owner(selector_id));
+
+        if let Some((method_val, owner_name)) = method {
+            let rest = nth_cdr(args, 1)?;
+            let msg_args = self.eval_args(rest, env)?;
+
+            let mut full_args = Vec::with_capacity(msg_args.len() + 1);
+            full_args.push(receiver);
+            full_args.extend(msg_args);
+
+            // Set current_method_class to the class that owns the super method
+            let prev = self.current_method_class.take();
+            self.current_method_class = self.find_class_by_name(owner_name, &self.global_env.clone());
+
+            let result = match method_val {
+                Value::Closure(ref c) => call_closure(self, c, full_args),
+                _ => Err(MoofError::runtime("super: method is not callable")),
+            };
+
+            self.current_method_class = prev;
+            result
+        } else {
+            let selector_name = self.symbols.name(selector_id).to_string();
+            Err(MoofError::runtime(format!(
+                "super: method '{}' not found in superclass",
+                selector_name
+            )))
+        }
+    }
+
     // ── __table ─────────────────────────────────────────────────────
 
     fn eval_table(&mut self, args: &Value, env: &Env) -> Result<Value> {
@@ -1286,21 +1381,29 @@ impl Interpreter {
         args: Vec<Value>,
     ) -> Result<Value> {
         let class = self.class_of(&receiver);
-        let method = class.borrow().lookup(selector);
+        let lookup_result = class.borrow().lookup_owner(selector);
 
-        if let Some(method_val) = method {
+        if let Some((method_val, owner_class_name)) = lookup_result {
             // Prepend receiver as `self` argument
             let mut full_args = Vec::with_capacity(args.len() + 1);
             full_args.push(receiver);
             full_args.extend(args);
 
-            match method_val {
+            // Set current_method_class so setup_call_env can bind __current_class
+            let defining_class = self.find_class_by_name(owner_class_name, &self.global_env.clone());
+            let prev = self.current_method_class.take();
+            self.current_method_class = defining_class;
+
+            let result = match method_val {
                 Value::Closure(ref c) => call_closure(self, c, full_args),
                 _ => Err(MoofError::runtime(format!(
                     "Method '{}' is not callable",
                     self.symbols.name(selector)
                 ))),
-            }
+            };
+
+            self.current_method_class = prev;
+            result
         } else {
             // For Objects: try field access by selector name
             if let Value::Object(ref obj_rc) = receiver {
@@ -1309,6 +1412,24 @@ impl Interpreter {
                 if let Some(idx) = class_ref.field_index(selector) {
                     if let Some(field_val) = obj.get_field(idx) {
                         return Ok(field_val.clone());
+                    }
+                }
+            }
+
+            // Try doesNotUnderstand: hook (avoid infinite recursion by checking selector)
+            let dnu_id = self.symbols.intern("doesNotUnderstand:");
+            if selector != dnu_id {
+                if let Some(dnu_method) = class.borrow().lookup(dnu_id) {
+                    // Build a message table: { selector: "name", args: (arg-list) }
+                    let selector_name = self.symbols.name(selector).to_string();
+                    let mut msg_table = MoofTable::new();
+                    msg_table.hash.insert("selector".to_string(), Value::Str(Rc::from(selector_name.as_str())));
+                    msg_table.hash.insert("args".to_string(), Value::from_slice(&args));
+                    let msg_val = Value::Table(Rc::new(RefCell::new(msg_table)));
+
+                    let full_args = vec![receiver.clone(), msg_val];
+                    if let Value::Closure(ref c) = dnu_method {
+                        return call_closure(self, c, full_args);
                     }
                 }
             }
@@ -1349,6 +1470,7 @@ impl Interpreter {
         let mut superclass: Option<Rc<RefCell<MoofClass>>> = None;
         let mut field_names: Vec<SymId> = Vec::new();
         let mut methods: Vec<(SymId, Value)> = Vec::new();
+        let mut class_methods: Vec<(SymId, Value)> = Vec::new();
         let mut trait_names: Vec<SymId> = Vec::new();
 
         // Walk body items
@@ -1415,6 +1537,30 @@ impl Interpreter {
                         }));
                         methods.push((sel_id, closure));
                     }
+                    // (classmethod selector (params...) body...)
+                    else if kw == self.known.classmethod {
+                        let sel = nth_car(&inner.cdr, 0)?;
+                        let sel_id = sel.as_symbol().map_err(|_| {
+                            MoofError::runtime("classmethod: expected symbol selector")
+                        })?;
+                        let params_expr = nth_car(&inner.cdr, 1)?;
+
+                        // Parse params, prepend `self` (self = the class object)
+                        let (mut params, rest_param) = self.parse_params(params_expr)?;
+                        params.insert(0, self.known.self_);
+
+                        let method_body_list = nth_cdr(&inner.cdr, 1)?;
+                        let body = self.wrap_body(method_body_list);
+
+                        let closure = Value::Closure(Rc::new(MoofClosure {
+                            name: Some(sel_id),
+                            params,
+                            rest_param,
+                            body: ClosureBody::Expr(body),
+                            env: env.clone(),
+                        }));
+                        class_methods.push((sel_id, closure));
+                    }
                 }
             }
             cursor = &cell.cdr;
@@ -1451,9 +1597,21 @@ impl Interpreter {
 
             // Simpler approach: find the class by name from bootstrap or existing definitions
             if let Some(real_class) = self.find_class_by_name(name_id, env) {
-                let mut klass = real_class.borrow_mut();
-                for (sel, closure) in &methods {
-                    klass.add_method(*sel, closure.clone());
+                {
+                    let mut klass = real_class.borrow_mut();
+                    for (sel, closure) in &methods {
+                        klass.add_method(*sel, closure.clone());
+                    }
+                }
+                // Add class methods to the metaclass
+                if !class_methods.is_empty() {
+                    let metaclass = real_class.borrow().metaclass.clone();
+                    if let Some(mc) = metaclass {
+                        let mut mc_ref = mc.borrow_mut();
+                        for (sel, closure) in &class_methods {
+                            mc_ref.add_method(*sel, closure.clone());
+                        }
+                    }
                 }
                 return Ok(Value::Nil);
             }
@@ -1492,6 +1650,14 @@ impl Interpreter {
             field_names: Vec::new(),
             is_meta: true,
         }));
+
+        // Install class methods on the metaclass
+        {
+            let mut mc = metaclass.borrow_mut();
+            for (sel, closure) in class_methods {
+                mc.add_method(sel, closure);
+            }
+        }
 
         new_class.borrow_mut().metaclass = Some(metaclass.clone());
 
@@ -1846,7 +2012,7 @@ impl Interpreter {
 
     /// Try to find a MoofClass Rc by symbol id. Checks bootstrap classes first,
     /// then looks for __class:<name> in the environment.
-    fn find_class_by_name(
+    pub fn find_class_by_name(
         &self,
         name_id: SymId,
         env: &Env,
@@ -2287,7 +2453,7 @@ fn setup_call_env(
         call_env.define(rest_id, Value::from_slice(&rest_items), false);
     }
 
-    // If first param is `self` and the value is an Object, bind fields
+    // If first param is `self` and the value is an Object, bind fields and __current_class
     if !closure.params.is_empty() && closure.params[0] == interp.known.self_ {
         if let Some(self_val) = args.first() {
             if let Value::Object(obj_rc) = self_val {
@@ -2295,8 +2461,21 @@ fn setup_call_env(
                 let class = obj.class.borrow();
                 for (i, &field_id) in class.field_names.iter().enumerate() {
                     if let Some(val) = obj.get_field(i) {
-                        call_env.define(field_id, val.clone(), false);
+                        call_env.define(field_id, val.clone(), true);
                     }
+                }
+                drop(class);
+                // Bind __current_class if the interpreter has one set (from send_message)
+                if let Some(ref defining_class) = interp.current_method_class {
+                    let holder = MoofObject {
+                        class: defining_class.clone(),
+                        fields: Vec::new(),
+                    };
+                    call_env.define(
+                        interp.known.__current_class,
+                        Value::Object(Rc::new(RefCell::new(holder))),
+                        false,
+                    );
                 }
             }
         }

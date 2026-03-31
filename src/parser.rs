@@ -350,7 +350,13 @@ impl<'a> Parser<'a> {
         let (selector, args) = self.parse_selector_and_args(&TokenType::RBracket)?;
         self.expect(&TokenType::RBracket, "Expected ']'")?;
 
-        let send_sym = self.sym("__send");
+        // Check if receiver is the `super` keyword → emit __super-send
+        let is_super = matches!(&receiver, Value::Symbol(id) if *id == self.symbols.intern("super"));
+        let send_sym = if is_super {
+            self.sym("__super-send")
+        } else {
+            self.sym("__send")
+        };
         let mut items = vec![send_sym, receiver, Value::Str(Rc::from(selector.as_str()))];
         items.extend(args);
         Ok(Self::list(items))

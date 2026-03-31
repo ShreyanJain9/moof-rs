@@ -342,6 +342,101 @@ After the initial v2 merge, the remaining items from the plan were implemented:
 
 ---
 
+---
+
+## Session 5: Better Smalltalk — Phase 0
+
+### Starting point
+
+The v2 runtime had a working Smalltalk-style class hierarchy with metaclasses, message dispatch, and open classes, but several key Smalltalk features were missing: no `super` sends, no class methods, no `doesNotUnderstand:`, no `new`/`initialize` protocol, and no control-flow-as-messages. A plan was designed for both Smalltalk improvements (Phase 0) and a future bytecode VM (Phases 1-5), with benchmarks at each phase boundary.
+
+### Baseline benchmarks
+
+Before any changes, baseline timings were captured:
+
+| Benchmark | Time |
+|-----------|------|
+| fib(30) | 1850ms |
+| map 10k squares | 3.84ms |
+| 5k Points create | 7.39ms |
+| 5k Point.sum | 4.17ms |
+| 5k Shapes create | 10.13ms |
+| 5k area matches | 4.20ms |
+
+### What was built
+
+**`super` sends** -- `[super method]` syntax. Parser detects `super` as receiver and emits `(__super-send "method" args...)`. The interpreter binds `__current_class` in method call environments (via `send_message` tracking which class owns the resolved method). `eval_super_send` reads `__current_class`, gets its superclass, and starts method lookup there. Tested with 3-level inheritance chains: `C -> B -> Hello from A`.
+
+**Class methods via metaclass** -- `(classmethod selector (params) body)` inside class definitions. Methods are installed on the metaclass, making them callable on the class-as-Object. Works for new classes and reopened classes. Example: `(class Foo (classmethod greet () "hello"))` then `[Foo greet]`.
+
+**`new`/`initialize` protocol** -- `[ClassName new]` and `[ClassName new arg1 arg2]`. Implemented as a `new` method on `class_class` (inherited by all metaclasses) that allocates an instance with nil-filled fields, sends `[instance initialize ...]`, and returns the instance. Default `initialize` on Object does nothing. **Key fix**: `set!` inside methods now writes back to the object's actual fields (not just the local env copy), and field bindings in methods are now mutable. The old `(ClassName arg1 arg2)` shorthand continues to work.
+
+**`doesNotUnderstand:` hook** -- When method lookup fails and field access fails, `send_message` tries `doesNotUnderstand:` on the receiver's class before raising an error. The message argument is a table `{ selector: "name", args: (...) }`. Infinite recursion avoided by checking that the selector isn't `doesNotUnderstand:` itself. Enables proxy and method-missing patterns.
+
+**Control-flow-as-messages** -- Smalltalk-style block-based control flow:
+
+- `TrueClass`: `ifTrue:` evaluates block, `ifFalse:` returns nil, `ifTrue:ifFalse:` evaluates first block
+- `FalseClass`: mirror opposites
+- `NilClass`: `ifNil:` evaluates block, `ifNotNil:` returns nil, `ifTrue:ifFalse:` evaluates second block
+- `Object`: `ifNil:` returns nil, `ifNotNil:` evaluates block with self
+- `Closure`: `value`, `value:`, `value:value:` for evaluation; `whileTrue:` and `whileFalse:` for loops
+
+Note: zero-arg blocks require `{ || body }` syntax since `{ body }` is parsed as a table.
+
+**Bug fix**: `define` bindings were incorrectly marked as immutable (`false`), preventing `set!` from working on them. Fixed to `true` per the language spec.
+
+### Post-Phase 0 benchmarks
+
+| Benchmark | Baseline | Post-Phase 0 | Change |
+|-----------|----------|--------------|--------|
+| fib(30) | 1850ms | 1868ms | ~same |
+| map 10k | 3.84ms | 4.20ms | ~same |
+| 5k Points create | 7.39ms | 7.98ms | ~same |
+| 5k Point.sum | 4.17ms | 6.32ms | +52% (lookup_owner overhead) |
+| 5k Shapes create | 10.13ms | 10.27ms | ~same |
+| 5k area matches | 4.20ms | 4.48ms | ~same |
+
+The Point.sum regression is from `lookup_owner` (now returns method + defining class name for super send support) and `current_method_class` save/restore in `send_message`. This overhead will be eliminated by the bytecode VM's inline caching.
+
+### Tested
+
+All six example files pass. New features tested:
+
+```moof
+;; super sends
+(class A (method greet () "Hello from A"))
+(class B (extends A) (method greet () $"B -> \([super greet])"))
+(class C (extends B) (method greet () $"C -> \([super greet])"))
+[(C) greet]  ;; => "C -> B -> Hello from A"
+
+;; Class methods
+(class Foo (classmethod greet () "Hello from Foo class"))
+[Foo greet]  ;; => "Hello from Foo class"
+
+;; new/initialize
+(class Counter (fields count)
+  (method initialize () (set! count 0))
+  (method increment () (set! count (+ count 1)))
+  (method value () count))
+(define c [Counter new])
+[c increment] [c increment] [c increment]
+[c value]  ;; => 3
+
+;; doesNotUnderstand:
+(class Logger (fields prefix)
+  (method doesNotUnderstand: (msg)
+    $"\([self prefix]): received \([msg at: "selector"])"))
+[(Logger "LOG") anything]  ;; => "LOG: received anything"
+
+;; Control flow as messages
+[true ifTrue: { || 42 } ifFalse: { || 0 }]  ;; => 42
+(define x 5) (define sum 0)
+[{ || (> x 0) } whileTrue: { || (do (set! sum (+ sum x)) (set! x (- x 1))) }]
+sum  ;; => 15
+```
+
+---
+
 ## Final state
 
 The codebase at the end of these sessions:

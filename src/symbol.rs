@@ -91,6 +91,10 @@ pub struct KnownSymbols {
     pub __fields: SymId,
     pub __call: SymId,
     pub __meta: SymId,
+    pub super_send: SymId,
+    pub super_: SymId,
+    pub __current_class: SymId,
+    pub classmethod: SymId,
 }
 
 impl KnownSymbols {
@@ -147,6 +151,10 @@ impl KnownSymbols {
             __fields: syms.intern("__fields"),
             __call: syms.intern("__call"),
             __meta: syms.intern("__meta"),
+            super_send: syms.intern("__super-send"),
+            super_: syms.intern("super"),
+            __current_class: syms.intern("__current_class"),
+            classmethod: syms.intern("classmethod"),
         }
     }
 }

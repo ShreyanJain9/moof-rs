@@ -8,7 +8,7 @@ use crate::error::{MoofError, Result};
 use crate::interpreter::Interpreter;
 use crate::moofint::MoofInt;
 use crate::value::{
-    ClosureBody, MoofClass, MoofClosure, MoofRange, MoofTable, NativeFn, Value,
+    ClosureBody, MoofClass, MoofClosure, MoofObject, MoofRange, MoofTable, NativeFn, Value,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -17,6 +17,7 @@ use crate::value::{
 
 pub fn install(interp: &mut Interpreter) {
     install_globals(interp);
+    install_class_class_methods(interp);
     install_object_methods(interp);
     install_symbol_methods(interp);
     install_integer_methods(interp);
@@ -57,6 +58,53 @@ fn register_method(interp: &mut Interpreter, class: &Rc<RefCell<MoofClass>>, nam
         env: interp.global_env.clone(),
     }));
     class.borrow_mut().add_method(id, closure);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Class-level methods (installed on class_class, inherited by all metaclasses)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Helper: given a class-as-Object (self in a class method), find the real MoofClass.
+fn class_from_class_object(interp: &mut Interpreter, class_obj: &Value) -> Result<Rc<RefCell<MoofClass>>> {
+    if let Value::Object(obj_rc) = class_obj {
+        let obj = obj_rc.borrow();
+        let metaclass = obj.class.borrow();
+        let class_name = metaclass.name;
+        drop(metaclass);
+        drop(obj);
+
+        let meta_str = interp.symbols.name(class_name).to_string();
+        let real_name = meta_str.strip_suffix(" meta").unwrap_or(&meta_str);
+        let real_id = interp.symbols.intern(real_name);
+
+        if let Some(real_class) = interp.find_class_by_name(real_id, &interp.global_env.clone()) {
+            return Ok(real_class);
+        }
+        Err(MoofError::runtime(format!("new: class '{}' not found", real_name)))
+    } else {
+        Err(MoofError::runtime("new: receiver is not a class"))
+    }
+}
+
+fn install_class_class_methods(interp: &mut Interpreter) {
+    let class = interp.class_class.clone();
+
+    // `new` — allocate instance with nil fields, send `initialize` with any extra args, return instance
+    register_method(interp, &class, "new", |interp, args| {
+        let class_obj = &args[0]; // self = the class-as-Object
+        let real_class = class_from_class_object(interp, class_obj)?;
+        let all_fields = real_class.borrow().all_field_names();
+        let fields = vec![Value::Nil; all_fields.len()];
+        let instance = Value::Object(Rc::new(RefCell::new(MoofObject {
+            class: real_class,
+            fields,
+        })));
+        // Pass extra args to initialize (supports [Foo new] and [Foo new 1 2])
+        let init_args: Vec<Value> = args[1..].to_vec();
+        let init_sel = interp.symbols.intern("initialize");
+        let _ = interp.send_message(instance.clone(), init_sel, init_args);
+        Ok(instance)
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1906,6 +1954,42 @@ fn install_bool_methods(interp: &mut Interpreter) {
             }
         });
     }
+
+    // TrueClass control flow
+    let tc = interp.true_class.clone();
+    register_method(interp, &tc, "ifTrue:", |interp, args| {
+        interp.invoke(args[1].clone(), vec![])
+    });
+    register_method(interp, &tc, "ifFalse:", |_interp, _args| {
+        Ok(Value::Nil)
+    });
+    register_method(interp, &tc, "ifTrue:ifFalse:", |interp, args| {
+        interp.invoke(args[1].clone(), vec![])
+    });
+    register_method(interp, &tc, "ifNil:", |_interp, _args| {
+        Ok(Value::Nil)
+    });
+    register_method(interp, &tc, "ifNotNil:", |interp, args| {
+        interp.invoke(args[1].clone(), vec![args[0].clone()])
+    });
+
+    // FalseClass control flow
+    let fc = interp.false_class.clone();
+    register_method(interp, &fc, "ifTrue:", |_interp, _args| {
+        Ok(Value::Nil)
+    });
+    register_method(interp, &fc, "ifFalse:", |interp, args| {
+        interp.invoke(args[1].clone(), vec![])
+    });
+    register_method(interp, &fc, "ifTrue:ifFalse:", |interp, args| {
+        interp.invoke(args[2].clone(), vec![])
+    });
+    register_method(interp, &fc, "ifNil:", |_interp, _args| {
+        Ok(Value::Nil)
+    });
+    register_method(interp, &fc, "ifNotNil:", |interp, args| {
+        interp.invoke(args[1].clone(), vec![args[0].clone()])
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1933,6 +2017,23 @@ fn install_nil_methods(interp: &mut Interpreter) {
 
     register_method(interp, &class, "class", |_interp, _args| {
         Ok(Value::Str(Rc::from("Nil")))
+    });
+
+    // Nil control flow
+    register_method(interp, &class, "ifNil:", |interp, args| {
+        interp.invoke(args[1].clone(), vec![])
+    });
+    register_method(interp, &class, "ifNotNil:", |_interp, _args| {
+        Ok(Value::Nil)
+    });
+    register_method(interp, &class, "ifTrue:", |_interp, _args| {
+        Ok(Value::Nil)
+    });
+    register_method(interp, &class, "ifFalse:", |interp, args| {
+        interp.invoke(args[1].clone(), vec![])
+    });
+    register_method(interp, &class, "ifTrue:ifFalse:", |interp, args| {
+        interp.invoke(args[2].clone(), vec![])
     });
 }
 
@@ -2002,6 +2103,43 @@ fn install_closure_methods(interp: &mut Interpreter) {
             body: ClosureBody::Expr(body),
             env: curry_env,
         })))
+    });
+
+    // Smalltalk-style block evaluation
+    register_method(interp, &class, "value", |interp, args| {
+        invoke(interp, &args[0], vec![])
+    });
+
+    register_method(interp, &class, "value:", |interp, args| {
+        invoke(interp, &args[0], vec![args[1].clone()])
+    });
+
+    register_method(interp, &class, "value:value:", |interp, args| {
+        invoke(interp, &args[0], vec![args[1].clone(), args[2].clone()])
+    });
+
+    // whileTrue: — call self (condition block) in a loop, call body if truthy
+    register_method(interp, &class, "whileTrue:", |interp, args| {
+        let condition = &args[0];
+        let body = &args[1];
+        loop {
+            let test = invoke(interp, condition, vec![])?;
+            if !test.is_truthy() { break; }
+            invoke(interp, body, vec![])?;
+        }
+        Ok(Value::Nil)
+    });
+
+    // whileFalse: — call self in a loop, call body if falsy
+    register_method(interp, &class, "whileFalse:", |interp, args| {
+        let condition = &args[0];
+        let body = &args[1];
+        loop {
+            let test = invoke(interp, condition, vec![])?;
+            if test.is_truthy() { break; }
+            invoke(interp, body, vec![])?;
+        }
+        Ok(Value::Nil)
     });
 }
 
@@ -2090,6 +2228,19 @@ fn install_object_methods(interp: &mut Interpreter) {
             vec![]
         };
         interp.send_message(receiver, selector_id, msg_args)
+    });
+
+    // Default initialize — does nothing. User classes override this.
+    register_method(interp, &class, "initialize", |_interp, _args| {
+        Ok(Value::Nil)
+    });
+
+    // Default ifNil:/ifNotNil: on Object — non-nil values
+    register_method(interp, &class, "ifNil:", |_interp, _args| {
+        Ok(Value::Nil)
+    });
+    register_method(interp, &class, "ifNotNil:", |interp, args| {
+        interp.invoke(args[1].clone(), vec![args[0].clone()])
     });
 }
 

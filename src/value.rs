@@ -179,6 +179,18 @@ impl MoofClass {
         None
     }
 
+    /// Lookup a method, also returning the name of the class that owns it.
+    /// Used for super sends to know which class the currently-executing method belongs to.
+    pub fn lookup_owner(&self, selector: SymId) -> Option<(Value, SymId)> {
+        if let Some(method) = self.methods.get(&selector) {
+            return Some((method.clone(), self.name));
+        }
+        if let Some(ref sup) = self.superclass {
+            return sup.borrow().lookup_owner(selector);
+        }
+        None
+    }
+
     pub fn add_method(&mut self, selector: SymId, closure: Value) {
         self.methods.insert(selector, closure);
     }

@@ -88,6 +88,15 @@ Object
   Class (metaclass of itself)
 ```
 
+## Smalltalk Features (Phase 0)
+
+- **`super` sends**: `[super method]` in method bodies starts lookup from superclass of defining class. Parser emits `__super-send`, interpreter tracks `__current_class` via `current_method_class` on Interpreter struct.
+- **Class methods**: `(classmethod selector (params) body)` in class definitions installs methods on the metaclass. Callable via `[ClassName method]`.
+- **`new`/`initialize`**: `[ClassName new]` or `[ClassName new arg1 arg2]` allocates instance with nil fields, sends `initialize` with args. Default `initialize` on Object does nothing. Old `(ClassName arg1 arg2)` shorthand still works.
+- **`doesNotUnderstand:`**: When method lookup fails, tries `doesNotUnderstand:` on the class before raising error. Message arg is `{ selector: "name", args: (...) }`.
+- **Control-flow-as-messages**: `ifTrue:`, `ifFalse:`, `ifTrue:ifFalse:` on Bool; `ifNil:`, `ifNotNil:` on Nil/Object; `value`, `value:`, `whileTrue:`, `whileFalse:` on Closure. Zero-arg blocks use `{ || body }` syntax.
+- **Mutable field bindings**: `set!` inside methods writes back to the object's actual fields. Field bindings in methods are mutable.
+
 ## Example Files
 
 `prototype/examples/` contains runnable `.moof` files: hello, fibonacci, messages, pattern_matching, pipeline, adts.
