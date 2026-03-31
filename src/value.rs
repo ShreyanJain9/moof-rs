@@ -1,121 +1,156 @@
-use std::collections::HashMap;
-use std::fmt;
 use std::cell::RefCell;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use indexmap::IndexMap;
+use crate::cons::ConsCell;
+use crate::moofint::MoofInt;
+use crate::symbol::SymId;
 
-use crate::ast::Expr;
-use crate::environment::Env;
+// ── Core Value enum ──────────────────────────────────────────────────
 
-/// Runtime values in Moof.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum Value {
-    Integer(i64),
+    Integer(MoofInt),
     Float(f64),
-    Str(String),
     Bool(bool),
     Nil,
-    Symbol(String),
-    List(Vec<Value>),
-    Map(IndexMap<String, Value>),   // ordered map (preserves insertion order, O(1) lookup)
-    Function(MoofFunction),
-    Builtin(String, BuiltinFn),    // name, function pointer
-    Class(Rc<RefCell<MoofClass>>),
-    Object(MoofObject),
-    Protocol(MoofProtocol),
-    Macro(MoofMacro),
+    Symbol(SymId),
+    Str(Rc<str>),
+    Cons(Rc<ConsCell>),
+    Table(Rc<RefCell<MoofTable>>),
+    Object(Rc<RefCell<MoofObject>>),
+    Closure(Rc<MoofClosure>),
 }
 
-/// Internal evaluation result — separates TCO control flow from user-visible values.
-pub enum Eval {
-    Val(Value),
-    TailCall { func: Value, args: Vec<Value> },
+// ── MoofTable ────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct MoofTable {
+    pub array: Vec<Value>,
+    pub hash: indexmap::IndexMap<String, Value>,
 }
 
-pub type BuiltinFn = fn(&mut crate::interpreter::Interpreter, Vec<Value>) -> crate::error::Result<Value>;
+impl MoofTable {
+    pub fn new() -> Self {
+        MoofTable {
+            array: Vec::new(),
+            hash: indexmap::IndexMap::new(),
+        }
+    }
 
-/// Built-in method: takes (interpreter, receiver, args).
-pub type BuiltinMethodFn = fn(&mut crate::interpreter::Interpreter, Value, Vec<Value>) -> crate::error::Result<Value>;
+    pub fn get(&self, key: &Value) -> Option<&Value> {
+        match key {
+            Value::Integer(n) => {
+                let idx = n.to_i64()? as usize;
+                self.array.get(idx)
+            }
+            Value::Str(s) => self.hash.get(s.as_ref()),
+            _ => None,
+        }
+    }
 
-/// A method is either a user-defined function or a Rust built-in.
-#[derive(Clone)]
-pub enum Method {
-    UserDefined(MoofFunction),
-    Builtin(String, BuiltinMethodFn), // name, function
+    pub fn set(&mut self, key: Value, val: Value) {
+        match key {
+            Value::Integer(n) => {
+                if let Some(idx) = n.to_i64() {
+                    let idx = idx as usize;
+                    if idx < self.array.len() {
+                        self.array[idx] = val;
+                    } else {
+                        // Extend array up to index, filling with Nil
+                        while self.array.len() < idx {
+                            self.array.push(Value::Nil);
+                        }
+                        self.array.push(val);
+                    }
+                }
+            }
+            Value::Str(s) => {
+                self.hash.insert(s.to_string(), val);
+            }
+            _ => {} // Silently ignore unsupported key types for now
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.array.len() + self.hash.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.array.is_empty() && self.hash.is_empty()
+    }
+
+    pub fn keys(&self) -> Vec<Value> {
+        let mut keys = Vec::with_capacity(self.len());
+        for i in 0..self.array.len() {
+            keys.push(Value::Integer(MoofInt::from_i64(i as i64)));
+        }
+        for k in self.hash.keys() {
+            keys.push(Value::Str(Rc::from(k.as_str())));
+        }
+        keys
+    }
+
+    pub fn values(&self) -> Vec<&Value> {
+        let mut vals: Vec<&Value> = Vec::with_capacity(self.len());
+        for v in &self.array {
+            vals.push(v);
+        }
+        for v in self.hash.values() {
+            vals.push(v);
+        }
+        vals
+    }
 }
 
-impl fmt::Debug for Method {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Method::UserDefined(func) => write!(f, "Method::UserDefined({:?})", func.name),
-            Method::Builtin(name, _) => write!(f, "Method::Builtin({})", name),
+// ── MoofObject ───────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub struct MoofObject {
+    pub class: Rc<RefCell<MoofClass>>,
+    pub fields: Vec<Value>,
+}
+
+impl MoofObject {
+    pub fn get_field(&self, index: usize) -> Option<&Value> {
+        self.fields.get(index)
+    }
+
+    pub fn set_field(&mut self, index: usize, val: Value) {
+        if index < self.fields.len() {
+            self.fields[index] = val;
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct MoofFunction {
-    pub name: Option<String>,
-    pub params: Vec<String>,
-    pub rest_param: Option<String>,
-    pub body: Box<Expr>,
-    pub closure: Env,
-}
+// ── MoofClass ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MoofClass {
-    pub name: String,
+    pub name: SymId,
     pub superclass: Option<Rc<RefCell<MoofClass>>>,
-    pub fields: Vec<String>,
-    pub own_fields: Vec<String>,
-    pub methods: HashMap<String, Method>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MoofObject {
-    pub class: Rc<RefCell<MoofClass>>,
-    pub fields: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MoofProtocol {
-    pub name: String,
-    pub selectors: Vec<String>,
-    pub default_methods: HashMap<String, MoofFunction>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MoofMacro {
-    pub name: String,
-    pub params: Vec<String>,
-    pub body: Box<Expr>,
+    pub metaclass: Option<Rc<RefCell<MoofClass>>>,
+    pub methods: std::collections::HashMap<SymId, Value>,
+    pub field_names: Vec<SymId>,
+    pub is_meta: bool,
 }
 
 impl MoofClass {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: SymId) -> Self {
         MoofClass {
             name,
             superclass: None,
-            fields: vec![],
-            own_fields: vec![],
-            methods: HashMap::new(),
+            metaclass: None,
+            methods: std::collections::HashMap::new(),
+            field_names: Vec::new(),
+            is_meta: false,
         }
     }
 
-    pub fn all_fields(&self) -> Vec<String> {
-        let mut fields = if let Some(ref sup) = self.superclass {
-            sup.borrow().all_fields()
-        } else {
-            vec![]
-        };
-        fields.extend(self.own_fields.clone());
-        fields
-    }
-
-    pub fn lookup(&self, selector: &str) -> Option<Method> {
-        if let Some(m) = self.methods.get(selector) {
-            return Some(m.clone());
+    pub fn lookup(&self, selector: SymId) -> Option<Value> {
+        if let Some(method) = self.methods.get(&selector) {
+            return Some(method.clone());
         }
         if let Some(ref sup) = self.superclass {
             return sup.borrow().lookup(selector);
@@ -123,200 +158,346 @@ impl MoofClass {
         None
     }
 
-    pub fn register_builtin(&mut self, selector: &str, f: BuiltinMethodFn) {
-        self.methods.insert(selector.to_string(), Method::Builtin(selector.to_string(), f));
+    pub fn add_method(&mut self, selector: SymId, closure: Value) {
+        self.methods.insert(selector, closure);
     }
 
-    pub fn method_names(&self) -> Vec<String> {
-        self.methods.keys().cloned().collect()
+    pub fn field_index(&self, name: SymId) -> Option<usize> {
+        self.all_field_names().iter().position(|&n| n == name)
     }
 
-    pub fn reopen(&mut self, new_fields: Vec<String>, new_methods: HashMap<String, Method>) {
-        for f in new_fields {
-            if !self.own_fields.contains(&f) {
-                self.own_fields.push(f.clone());
-                self.fields.push(f);
-            }
-        }
-        self.methods.extend(new_methods);
-    }
-}
-
-impl MoofObject {
-    pub fn get_field(&self, name: &str) -> Option<&Value> {
-        self.fields.get(name)
-    }
-
-    pub fn set_field(&mut self, name: &str, value: Value) {
-        self.fields.insert(name.to_string(), value);
+    pub fn all_field_names(&self) -> Vec<SymId> {
+        let mut fields = if let Some(ref sup) = self.superclass {
+            sup.borrow().all_field_names()
+        } else {
+            Vec::new()
+        };
+        fields.extend_from_slice(&self.field_names);
+        fields
     }
 }
 
-impl MoofFunction {
-    pub fn arity(&self) -> usize { self.params.len() }
-    pub fn is_variadic(&self) -> bool { self.rest_param.is_some() }
+// ── MoofClosure ──────────────────────────────────────────────────────
+
+pub struct MoofClosure {
+    pub name: Option<SymId>,
+    pub params: Vec<SymId>,
+    pub rest_param: Option<SymId>,
+    pub body: ClosureBody,
+    pub env: crate::environment::Env,
 }
 
-// ── Value Display ─────────────────────────────────────────────────
+pub enum ClosureBody {
+    Expr(Value),
+    Native(NativeFn),
+}
 
-impl fmt::Display for Value {
+pub type NativeFn = fn(&mut crate::interpreter::Interpreter, Vec<Value>) -> crate::error::Result<Value>;
+
+impl fmt::Debug for MoofClosure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MoofClosure")
+            .field("name", &self.name)
+            .field("params", &self.params)
+            .field("rest_param", &self.rest_param)
+            .field("body", &self.body)
+            .finish()
+    }
+}
+
+impl fmt::Debug for ClosureBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Integer(n) => write!(f, "{n}"),
-            Value::Float(n) => write!(f, "{n}"),
-            Value::Str(s) => write!(f, "{s}"),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Nil => write!(f, "nil"),
-            Value::Symbol(s) => write!(f, "'{s}"),
-            Value::List(items) => {
-                write!(f, "(")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 { write!(f, " ")?; }
-                    write!(f, "{item}")?;
-                }
-                write!(f, ")")
-            }
-            Value::Map(map) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in map.iter().enumerate() {
-                    if i > 0 { write!(f, " ")?; }
-                    write!(f, "{k}: {v}")?;
-                }
-                write!(f, "}}")
-            }
-            Value::Function(func) => {
-                if let Some(ref name) = func.name {
-                    write!(f, "<fn {name}/{}>", func.arity())
-                } else {
-                    write!(f, "<lambda/{}>", func.arity())
-                }
-            }
-            Value::Builtin(name, _) => write!(f, "<builtin {name}>"),
-            Value::Class(class) => write!(f, "<class {}>", class.borrow().name),
-            Value::Object(obj) => {
-                let class = obj.class.borrow();
-                if obj.fields.is_empty() {
-                    write!(f, "{}", class.name)
-                } else {
-                    write!(f, "({}", class.name)?;
-                    for field in &class.all_fields() {
-                        if let Some(val) = obj.fields.get(field) {
-                            write!(f, " {field}: {val}")?;
-                        }
-                    }
-                    write!(f, ")")
-                }
-            }
-            Value::Protocol(p) => write!(f, "<protocol {} [{}]>", p.name, p.selectors.join(" ")),
-            Value::Macro(m) => write!(f, "<macro {}>", m.name),
+            ClosureBody::Expr(_) => write!(f, "Expr(...)"),
+            ClosureBody::Native(_) => write!(f, "Native"),
         }
     }
 }
 
-// ── Value Inspection (with quotes around strings) ─────────────────
+impl Clone for ClosureBody {
+    fn clone(&self) -> Self {
+        match self {
+            ClosureBody::Expr(v) => ClosureBody::Expr(v.clone()),
+            ClosureBody::Native(f) => ClosureBody::Native(*f),
+        }
+    }
+}
+
+impl Clone for MoofClosure {
+    fn clone(&self) -> Self {
+        MoofClosure {
+            name: self.name,
+            params: self.params.clone(),
+            rest_param: self.rest_param,
+            body: self.body.clone(),
+            env: self.env.clone(),
+        }
+    }
+}
+
+// ── Value constructors and accessors ─────────────────────────────────
 
 impl Value {
-    pub fn inspect(&self) -> String {
+    /// Create a Cons cell from car and cdr.
+    pub fn cons(car: Value, cdr: Value) -> Value {
+        Value::Cons(Rc::new(ConsCell { car, cdr }))
+    }
+
+    /// Extract the car of a cons cell.
+    pub fn car(&self) -> crate::error::Result<&Value> {
         match self {
-            Value::Str(s) => format!("{s:?}"),
-            other => format!("{other}"),
+            Value::Cons(cell) => Ok(&cell.car),
+            other => Err(crate::error::MoofError::runtime(format!(
+                "car: expected Cons, got {}",
+                other.type_name()
+            ))),
         }
+    }
+
+    /// Extract the cdr of a cons cell.
+    pub fn cdr(&self) -> crate::error::Result<&Value> {
+        match self {
+            Value::Cons(cell) => Ok(&cell.cdr),
+            other => Err(crate::error::MoofError::runtime(format!(
+                "cdr: expected Cons, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    pub fn is_nil(&self) -> bool {
+        matches!(self, Value::Nil)
+    }
+
+    pub fn is_cons(&self) -> bool {
+        matches!(self, Value::Cons(_))
     }
 
     pub fn is_truthy(&self) -> bool {
         !matches!(self, Value::Bool(false) | Value::Nil)
     }
 
-    // ── Typed accessors ────────────────────────────────────────────
-
-    pub fn as_int(&self) -> crate::error::Result<i64> {
+    pub fn type_name(&self) -> &'static str {
         match self {
-            Value::Integer(n) => Ok(*n),
-            other => Err(crate::error::MoofError::runtime(format!("Expected Integer, got {}", other.type_name()))),
+            Value::Integer(_) => "Integer",
+            Value::Float(_) => "Float",
+            Value::Bool(_) => "Bool",
+            Value::Nil => "Nil",
+            Value::Symbol(_) => "Symbol",
+            Value::Str(_) => "String",
+            Value::Cons(_) => "Cons",
+            Value::Table(_) => "Table",
+            Value::Object(_) => "Object",
+            Value::Closure(_) => "Closure",
+        }
+    }
+
+    /// Iterate over elements of a proper cons list.
+    pub fn iter_list(&self) -> crate::cons::ListIter {
+        crate::cons::ListIter::new(self)
+    }
+
+    /// Collect a proper cons list into a Vec. Returns error if not Cons or Nil.
+    pub fn to_vec(&self) -> crate::error::Result<Vec<Value>> {
+        match self {
+            Value::Nil => Ok(Vec::new()),
+            Value::Cons(_) => Ok(crate::cons::cons_to_vec(self)),
+            other => Err(crate::error::MoofError::runtime(format!(
+                "to_vec: expected list, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    /// Build a cons list from a slice.
+    pub fn from_slice(items: &[Value]) -> Value {
+        crate::cons::vec_to_cons(items)
+    }
+
+    /// Like Display but strings get quotes.
+    pub fn inspect(&self) -> String {
+        match self {
+            Value::Str(s) => format!("{:?}", &**s),
+            other => format!("{other}"),
+        }
+    }
+
+    // ── Typed accessors ──────────────────────────────────────────────
+
+    pub fn as_int(&self) -> crate::error::Result<&MoofInt> {
+        match self {
+            Value::Integer(n) => Ok(n),
+            other => Err(crate::error::MoofError::runtime(format!(
+                "Expected Integer, got {}",
+                other.type_name()
+            ))),
         }
     }
 
     pub fn as_float(&self) -> crate::error::Result<f64> {
         match self {
             Value::Float(n) => Ok(*n),
-            other => Err(crate::error::MoofError::runtime(format!("Expected Float, got {}", other.type_name()))),
-        }
-    }
-
-    pub fn as_number(&self) -> crate::error::Result<f64> {
-        match self {
-            Value::Integer(n) => Ok(*n as f64),
-            Value::Float(n) => Ok(*n),
-            other => Err(crate::error::MoofError::runtime(format!("Expected number, got {}", other.type_name()))),
+            other => Err(crate::error::MoofError::runtime(format!(
+                "Expected Float, got {}",
+                other.type_name()
+            ))),
         }
     }
 
     pub fn as_str(&self) -> crate::error::Result<&str> {
         match self {
             Value::Str(s) => Ok(s),
-            other => Err(crate::error::MoofError::runtime(format!("Expected String, got {}", other.type_name()))),
+            other => Err(crate::error::MoofError::runtime(format!(
+                "Expected String, got {}",
+                other.type_name()
+            ))),
         }
     }
 
-    pub fn as_list(&self) -> crate::error::Result<&[Value]> {
+    pub fn as_symbol(&self) -> crate::error::Result<SymId> {
         match self {
-            Value::List(v) => Ok(v),
-            other => Err(crate::error::MoofError::runtime(format!("Expected List, got {}", other.type_name()))),
+            Value::Symbol(id) => Ok(*id),
+            other => Err(crate::error::MoofError::runtime(format!(
+                "Expected Symbol, got {}",
+                other.type_name()
+            ))),
         }
     }
 
-    pub fn into_list(self) -> crate::error::Result<Vec<Value>> {
+    pub fn as_number_f64(&self) -> crate::error::Result<f64> {
         match self {
-            Value::List(v) => Ok(v),
-            other => Err(crate::error::MoofError::runtime(format!("Expected List, got {}", other.type_name()))),
-        }
-    }
-
-    pub fn as_bool(&self) -> crate::error::Result<bool> {
-        match self {
-            Value::Bool(b) => Ok(*b),
-            other => Err(crate::error::MoofError::runtime(format!("Expected Bool, got {}", other.type_name()))),
-        }
-    }
-
-    pub fn type_name(&self) -> String {
-        match self {
-            Value::Integer(_) => "Integer".to_string(),
-            Value::Float(_) => "Float".to_string(),
-            Value::Str(_) => "String".to_string(),
-            Value::Bool(_) => "Bool".to_string(),
-            Value::Nil => "Nil".to_string(),
-            Value::Symbol(_) => "Symbol".to_string(),
-            Value::List(_) => "List".to_string(),
-            Value::Map(_) => "Map".to_string(),
-            Value::Function(_) => "Function".to_string(),
-            Value::Builtin(_, _) => "Function".to_string(),
-            Value::Class(_) => "Class".to_string(),
-            Value::Object(o) => o.class.borrow().name.clone(),
-            Value::Protocol(_) => "Protocol".to_string(),
-            Value::Macro(_) => "Macro".to_string(),
+            Value::Integer(n) => Ok(n.to_f64()),
+            Value::Float(n) => Ok(*n),
+            other => Err(crate::error::MoofError::runtime(format!(
+                "Expected number, got {}",
+                other.type_name()
+            ))),
         }
     }
 }
+
+// ── Display ──────────────────────────────────────────────────────────
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Integer(n) => write!(f, "{n}"),
+            Value::Float(n) => {
+                if n.fract() == 0.0 && !n.is_nan() && !n.is_infinite() {
+                    write!(f, "{n:.1}")
+                } else {
+                    write!(f, "{n}")
+                }
+            }
+            Value::Bool(b) => write!(f, "{b}"),
+            Value::Nil => write!(f, "nil"),
+            Value::Symbol(id) => write!(f, "#<symbol:{id}>"),
+            Value::Str(s) => write!(f, "{s}"),
+            Value::Cons(_) => crate::cons::cons_display(self, f),
+            Value::Table(tbl) => {
+                let tbl = tbl.borrow();
+                let has_array = !tbl.array.is_empty();
+                let has_hash = !tbl.hash.is_empty();
+                write!(f, "{{")?;
+                let mut first = true;
+                if has_array {
+                    for v in &tbl.array {
+                        if !first { write!(f, ", ")?; }
+                        first = false;
+                        write!(f, "{v}")?;
+                    }
+                }
+                if has_hash {
+                    for (k, v) in &tbl.hash {
+                        if !first { write!(f, ", ")?; }
+                        first = false;
+                        write!(f, "{k}: {v}")?;
+                    }
+                }
+                write!(f, "}}")
+            }
+            Value::Object(obj) => {
+                let obj = obj.borrow();
+                let class = obj.class.borrow();
+                write!(f, "#<{}>", class.name)
+            }
+            Value::Closure(c) => {
+                let arity = c.params.len();
+                if let Some(name) = c.name {
+                    write!(f, "<{name}/{arity}>")
+                } else {
+                    write!(f, "<lambda/{arity}>")
+                }
+            }
+        }
+    }
+}
+
+// ── PartialEq ────────────────────────────────────────────────────────
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Integer(a), Value::Float(b)) => (*a as f64) == *b,
-            (Value::Float(a), Value::Integer(b)) => *a == (*b as f64),
-            (Value::Str(a), Value::Str(b)) => a == b,
+            // Cross-numeric comparison: promote int to f64
+            (Value::Integer(a), Value::Float(b)) => a.to_f64() == *b,
+            (Value::Float(a), Value::Integer(b)) => *a == b.to_f64(),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
-            (Value::List(a), Value::List(b)) => a == b,
-            (Value::Map(a), Value::Map(b)) => a == b,
-            (Value::Object(a), Value::Object(b)) => {
-                std::ptr::eq(&*a.class as *const _, &*b.class as *const _)
-                    && a.fields == b.fields
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Cons(a), Value::Cons(b)) => a.car == b.car && a.cdr == b.cdr,
+            (Value::Table(a), Value::Table(b)) => {
+                let a = a.borrow();
+                let b = b.borrow();
+                a.array == b.array && a.hash == b.hash
             }
+            (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            // Closures are not comparable
+            (Value::Closure(_), Value::Closure(_)) => false,
             _ => false,
+        }
+    }
+}
+
+// ── Hash ─────────────────────────────────────────────────────────────
+
+impl Hash for Value {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Type tag to distinguish variants
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Integer(n) => n.hash(state),
+            Value::Float(n) => n.to_bits().hash(state),
+            Value::Bool(b) => b.hash(state),
+            Value::Nil => {}
+            Value::Symbol(id) => id.hash(state),
+            Value::Str(s) => s.hash(state),
+            Value::Cons(cell) => {
+                cell.car.hash(state);
+                cell.cdr.hash(state);
+            }
+            Value::Table(tbl) => {
+                let tbl = tbl.borrow();
+                tbl.array.len().hash(state);
+                for v in &tbl.array {
+                    v.hash(state);
+                }
+                tbl.hash.len().hash(state);
+                for (k, v) in &tbl.hash {
+                    k.hash(state);
+                    v.hash(state);
+                }
+            }
+            Value::Object(obj) => {
+                // Pointer identity
+                (Rc::as_ptr(obj) as usize).hash(state);
+            }
+            Value::Closure(c) => {
+                // Pointer identity
+                (Rc::as_ptr(c) as usize).hash(state);
+            }
         }
     }
 }

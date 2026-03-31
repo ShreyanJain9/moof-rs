@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct MoofError {
     pub kind: ErrorKind,
     pub message: String,
@@ -8,36 +8,67 @@ pub struct MoofError {
     pub column: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ErrorKind {
     Syntax,
     Runtime,
     Name,
     Message,
     Arity,
-    ImmutableBinding,
     Type,
+    IO,
 }
+
+pub type Result<T> = std::result::Result<T, MoofError>;
 
 impl MoofError {
     pub fn syntax(msg: impl Into<String>, line: usize, col: usize) -> Self {
-        MoofError { kind: ErrorKind::Syntax, message: msg.into(), line: Some(line), column: Some(col) }
+        MoofError {
+            kind: ErrorKind::Syntax,
+            message: msg.into(),
+            line: Some(line),
+            column: Some(col),
+        }
     }
 
     pub fn runtime(msg: impl Into<String>) -> Self {
-        MoofError { kind: ErrorKind::Runtime, message: msg.into(), line: None, column: None }
+        MoofError {
+            kind: ErrorKind::Runtime,
+            message: msg.into(),
+            line: None,
+            column: None,
+        }
     }
 
-    pub fn name(name: &str, line: Option<usize>, col: Option<usize>) -> Self {
-        MoofError { kind: ErrorKind::Name, message: format!("Undefined variable: {name}"), line, column: col }
+    pub fn name(msg: impl Into<String>) -> Self {
+        MoofError {
+            kind: ErrorKind::Name,
+            message: msg.into(),
+            line: None,
+            column: None,
+        }
     }
 
-    pub fn message(receiver: &str, selector: &str, suggestion: Option<&str>) -> Self {
-        let mut msg = format!("{receiver} does not respond to '{selector}'");
+    pub fn name_with_loc(msg: impl Into<String>, line: Option<usize>, col: Option<usize>) -> Self {
+        MoofError {
+            kind: ErrorKind::Name,
+            message: msg.into(),
+            line,
+            column: col,
+        }
+    }
+
+    pub fn message(receiver_type: &str, selector: &str, suggestion: Option<&str>) -> Self {
+        let mut msg = format!("{receiver_type} does not respond to '{selector}'");
         if let Some(s) = suggestion {
             msg.push_str(&format!("\n  Did you mean: {s}?"));
         }
-        MoofError { kind: ErrorKind::Message, message: msg, line: None, column: None }
+        MoofError {
+            kind: ErrorKind::Message,
+            message: msg,
+            line: None,
+            column: None,
+        }
     }
 
     pub fn arity(expected: &str, got: usize, name: Option<&str>) -> Self {
@@ -45,24 +76,37 @@ impl MoofError {
         MoofError {
             kind: ErrorKind::Arity,
             message: format!("Wrong number of arguments{fn_name}: expected {expected}, got {got}"),
-            line: None, column: None,
+            line: None,
+            column: None,
         }
     }
 
-    pub fn immutable(name: &str) -> Self {
+    pub fn type_error(msg: impl Into<String>) -> Self {
         MoofError {
-            kind: ErrorKind::ImmutableBinding,
-            message: format!("Cannot mutate immutable binding: {name}"),
-            line: None, column: None,
+            kind: ErrorKind::Type,
+            message: msg.into(),
+            line: None,
+            column: None,
         }
     }
-}
 
-impl MoofError {
+    pub fn io(msg: impl Into<String>) -> Self {
+        MoofError {
+            kind: ErrorKind::IO,
+            message: msg.into(),
+            line: None,
+            column: None,
+        }
+    }
+
     /// Attach source location if not already present.
     pub fn with_loc(mut self, line: Option<usize>, col: Option<usize>) -> Self {
-        if self.line.is_none() { self.line = line; }
-        if self.column.is_none() { self.column = col; }
+        if self.line.is_none() {
+            self.line = line;
+        }
+        if self.column.is_none() {
+            self.column = col;
+        }
         self
     }
 }
@@ -81,5 +125,3 @@ impl fmt::Display for MoofError {
 }
 
 impl std::error::Error for MoofError {}
-
-pub type Result<T> = std::result::Result<T, MoofError>;

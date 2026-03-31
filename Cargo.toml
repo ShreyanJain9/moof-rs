@@ -6,6 +6,9 @@ description = "Moof — a Lisp with Smalltalk-style message passing"
 
 [dependencies]
 indexmap = "2.13.0"
+num-bigint = "0.4.6"
+num-integer = "0.1.46"
+num-traits = "0.2.19"
 rustyline = "15"
 
 [profile.release]

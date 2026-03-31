@@ -2,7 +2,7 @@
 (define greeting "Hello, Moof!")
 (print [greeting length])
 (print [greeting uppercase])
-(print [greeting replaceAll: "Moof" with: "World"])
+(print [greeting replace_all: "Moof" with: "World"])
 
 ; Messages on numbers
 (print [42 abs])
