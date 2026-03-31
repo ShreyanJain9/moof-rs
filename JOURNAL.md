@@ -462,6 +462,29 @@ Three new files totaling ~1,700 lines:
 
 Remaining benchmarks (Points, Shapes) crash on stack overflow because TCO is not yet implemented in the VM — deferred to Phase 2.
 
+### Phase 2: TCO + Inline Caching + Match
+
+**TailCall frame reuse** -- `TailCall` opcode now overwrites the current frame's locals with new args and resets IP to 0, instead of pushing a new frame. No stack growth for tail-recursive functions. Works in both the main VM loop and the `execute_bytecode` interop path. `(loop 1000000)` completes without stack overflow.
+
+**Monomorphic inline caching** -- 1024-slot cache keyed by bytecode offset. Each `Send` instruction checks: does the receiver's class pointer match the cached entry? If yes, use the cached method directly (skipping the superclass chain walk). On miss, do full lookup and update the cache. `dispatch_send_cached` calls the method via `call_closure` on cache hit, bypassing `send_message`.
+
+**Match compilation** -- `match` expressions can't use the simple `Eval` fallback because the scrutinee is on the bytecode stack, invisible to the tree-walker's global env. Solution: compile the scrutinee, store it in a well-known global (`__vm_match_scrutinee`), reconstruct the match form with that global as the scrutinee, and Eval it. This bridges bytecode values into the tree-walker for pattern matching.
+
+**Call dispatch optimization** -- Bytecode-to-bytecode `Call` now rearranges the stack in-place (shifts args down over the callee slot) instead of collecting args into a `Vec` and pushing them back.
+
+### Final benchmark comparison (median of 3 runs)
+
+| Benchmark | Tree-walker | Bytecode VM | Speedup |
+|-----------|-----------|-------------|---------|
+| fib(30) | 2157ms | **1371ms** | **36% faster** |
+| map 10k | 3.81ms | 4.30ms | -13% (interop overhead) |
+| 5k Points create | 7.42ms | **5.47ms** | **26% faster** |
+| 5k Point.sum | 6.27ms | **5.63ms** | **10% faster** |
+| 5k Shapes create | 10.57ms | **7.95ms** | **25% faster** |
+| 5k area matches | 4.61ms | **4.53ms** | **2% faster** |
+
+The map 10k regression is due to the `execute_bytecode` interop path: when native `map:` invokes a compiled block, the mini-executor has overhead from being a flat function (no persistent frame stack). This will improve when more of the stdlib is compiled to bytecode.
+
 ---
 
 ## Final state
