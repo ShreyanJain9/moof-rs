@@ -504,16 +504,22 @@ Key bug found and fixed: `dispatch_tail_call` was reusing frames without updatin
 (c) ; => 3
 ```
 
-### Final session benchmark (single run)
+### Finishing Touches: try/catch + Interop Fix
+
+**try/catch compilation** -- `try` is compiled as `__vm_try(body_thunk, catch_thunk)` where both thunks are bytecode lambdas that capture outer variables via upvalues. The `__vm_try` native function calls the body thunk, and on error, calls the catch thunk with the error value. This fixed `(try (/ a b) (catch e "error"))` inside functions where `a` and `b` are parameters.
+
+**execute_bytecode upvalue fix** -- The standalone bytecode executor (used when native code like `map:` or `__vm_try` invokes a compiled block) now receives and uses the closure's upvalues. This fixed the map 10k regression and all cases where bytecode closures called from native code needed to access captured outer variables. MakeClosure in the mini-executor now also properly captures upvalues from the enclosing scope.
+
+### Final benchmark (median of 3 runs)
 
 | Benchmark | Tree-walker | Bytecode VM | Speedup |
 |-----------|-----------|-------------|---------|
-| fib(30) | 1907ms | **1418ms** | **26%** |
-| map 10k | 4.36ms | **2.77ms** | **36%** |
-| 5k Points create | 8.21ms | **5.25ms** | **36%** |
-| 5k Point.sum | 7.36ms | **5.60ms** | **24%** |
-| 5k Shapes create | 11.14ms | **8.17ms** | **27%** |
-| 5k area matches | 4.56ms | **4.41ms** | **3%** |
+| fib(30) | 2248ms | **1520ms** | **32%** |
+| map 10k | 4.32ms | **3.06ms** | **29%** |
+| 5k Points create | 9.83ms | **5.86ms** | **40%** |
+| 5k Point.sum | 7.23ms | **6.27ms** | **13%** |
+| 5k Shapes create | 12.00ms | **9.22ms** | **23%** |
+| 5k area matches | 4.74ms | 5.18ms | -9% (match→Eval bridge overhead) |
 
 All 6 example files produce identical output between tree-walker and bytecode VM.
 
@@ -525,21 +531,24 @@ The codebase at the end of these sessions:
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/interpreter.rs` | 2,383 | Tree-walking evaluator, class system, macros, modules |
-| `src/builtins.rs` | 2,377 | All built-in methods registered on type classes |
-| `src/repl.rs` | 768 | 15 meta-commands, tab completion, timing |
-| `src/parser.rs` | 695 | Recursive descent, all desugaring inline |
+| `src/interpreter.rs` | 2,632 | Tree-walking evaluator, class system, macros, modules |
+| `src/builtins.rs` | 2,556 | All built-in methods registered on type classes |
+| `src/repl.rs` | 1,188 | 15 meta-commands, tab completion, timing |
+| `src/compiler.rs` | 927 | AST → bytecode compiler, upvalue resolution |
+| `src/vm.rs` | 732 | Stack-based bytecode VM, inline caching, TCO |
+| `src/parser.rs` | 701 | Recursive descent, all desugaring inline |
 | `src/moofint.rs` | 600 | BigInt with auto-promotion |
-| `src/value.rs` | 542 | 10-variant Value enum, Range, display, hashing |
+| `src/value.rs` | 560 | 11-variant Value enum, Range, display, hashing |
+| `stdlib/stdlib.moof` | 311 | Self-hosting standard library |
 | `src/lexer.rs` | 272 | Tokenizer |
-| `src/symbol.rs` | 197 | Symbol table, 42 pre-interned known symbols |
-| `src/error.rs` | 142 | Error type with class hierarchy |
+| `src/bytecode.rs` | 259 | Op enum (31 opcodes), CompiledFunction, builder |
+| `src/symbol.rs` | 205 | Symbol table, pre-interned known symbols |
+| `src/main.rs` | 168 | CLI entry point (`--bytecode` flag) |
+| `src/error.rs` | 152 | Error type with class hierarchy |
 | `src/cons.rs` | 114 | Cons cells, list iteration |
 | `src/environment.rs` | 95 | Scoped environments with SymId keys |
-| `src/main.rs` | 110 | CLI entry point |
 | `src/token.rs` | 48 | Token enum |
-| `src/lib.rs` | 12 | Module declarations |
-| `stdlib/stdlib.moof` | 311 | Self-hosting standard library |
-| **Total** | **~8,666** | |
+| `src/lib.rs` | 15 | Module declarations |
+| **Total** | **~11,535** | |
 
-The language went from spec to Ruby prototype to Rust rewrite to elegant Rust to Smalltalk-inspired VM in four sessions. Each session followed the same discipline: plan first, define contracts, build in parallel, test against the example suite, fix what broke.
+The language went from spec to Ruby prototype to Rust rewrite to elegant Rust to Smalltalk-inspired VM to bytecode compiler in five sessions. Each session followed the same discipline: plan first, define contracts, build in parallel, test against the example suite, fix what broke.
