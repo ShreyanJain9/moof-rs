@@ -437,6 +437,33 @@ sum  ;; => 15
 
 ---
 
+---
+
+## Session 5 (continued): Bytecode VM — Phase 1
+
+### What was built
+
+Three new files totaling ~1,700 lines:
+
+**bytecode.rs** (~250 lines) — 31 opcodes covering stack manipulation, constants, variable access (local/global/upvalue), message sends (Send, TailSend, SendSuper), control flow (jumps, conditional jumps), function calls (Call, TailCall, MakeClosure, Return), object construction (MakeList, MakeTable, MakeTableArray), and special ops (StringInterp, Eval). `CompiledFunction` struct holds bytecode, constant pool, upvalue descriptors. `BytecodeBuilder` provides emit/patch helpers.
+
+**compiler.rs** (~500 lines) — Compiles parsed AST (cons lists from parser) into `CompiledFunction` bytecode. Handles: literals, `if`, `do`, `let`, `define`, `set!`, `lambda`/`fn`, `and`, `or`, `cond`, `quote`, `__send`, `__str-interp`, `__table`, `__table-array`. Uncompiled forms (`class`, `type`, `match`, `try`, `trait`, `protocol`, `module`, `use`, `require`, `defmacro`, `quasiquote`, `__super-send`) fall through to an `Eval` opcode that calls the tree-walker. Macros are expanded at compile time via tree-walker.
+
+**vm.rs** (~450 lines) — Stack-based VM with call frame stack. Main `run()` loop dispatches on opcodes. `dispatch_call()` handles bytecode closures (push new frame), native closures (call directly), and expr closures (fall back to tree-walker). `dispatch_send()` delegates to `interp.send_message()`. Standalone `execute_bytecode()` function enables tree-walker↔bytecode interop — when a native method like `map:` invokes a bytecode-compiled block, it works.
+
+**Key design**: `ClosureBody::Bytecode(Rc<CompiledFunction>)` added to the Value enum. Bytecode closures coexist with tree-walker closures. The VM calls native builtins directly and falls back to the tree-walker for uncompiled features. The `--bytecode` / `-b` CLI flag selects the bytecode path.
+
+### Phase 1 benchmarks
+
+| Benchmark | Baseline (tree-walk) | Phase 1 (bytecode VM) | Speedup |
+|-----------|---------------------|----------------------|---------|
+| fib(30) | 1850ms | 1299ms | **30% faster** |
+| map 10k | 3.84ms | 2.73ms | **29% faster** |
+
+Remaining benchmarks (Points, Shapes) crash on stack overflow because TCO is not yet implemented in the VM — deferred to Phase 2.
+
+---
+
 ## Final state
 
 The codebase at the end of these sessions:
