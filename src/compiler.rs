@@ -172,8 +172,10 @@ impl<'a> Compiler<'a> {
             if id == k.table_array { return self.compile_table_array(rest); }
             if id == k.cond { return self.compile_cond(rest, tail); }
 
+            if id == k.match_ { return self.compile_match(rest, tail); }
+
             // Forms not yet compiled: fall back to tree-walker via Eval opcode
-            if id == k.class || id == k.type_ || id == k.match_ || id == k.try_
+            if id == k.class || id == k.type_ || id == k.try_
                 || id == k.trait_ || id == k.protocol || id == k.module
                 || id == k.use_ || id == k.require || id == k.defmacro
                 || id == k.quasiquote || id == k.super_send
@@ -588,6 +590,38 @@ impl<'a> Compiler<'a> {
         for jump in end_jumps.into_iter().flatten() {
             self.current().builder.patch_jump(jump);
         }
+        Ok(())
+    }
+
+    fn compile_match(&mut self, args: &Value, _tail: bool) -> Result<()> {
+        // Strategy: compile scrutinee, store in a global, then Eval a match form
+        // that references the global. This bridges bytecode locals to tree-walker.
+        let scrutinee = nth_car(args, 0)?;
+        let clauses = nth_cdr(args, 0)?;
+
+        // Compile scrutinee
+        self.compile_expr(scrutinee, false)?;
+
+        // Store scrutinee in a well-known global
+        let match_val_sym = self.interp.symbols.intern("__vm_match_scrutinee");
+        self.current().builder.emit_op_u16(Op::SetGlobal, match_val_sym as u16);
+        self.current().builder.emit_op(Op::Pop); // SetGlobal leaves value on stack; discard
+
+        // Build the match form: (match __vm_match_scrutinee clause1 clause2 ...)
+        let scrutinee_sym = Value::Symbol(match_val_sym);
+        let match_sym = Value::Symbol(self.interp.known.match_);
+        let match_form = Value::Cons(Rc::new(crate::cons::ConsCell {
+            car: match_sym,
+            cdr: Value::Cons(Rc::new(crate::cons::ConsCell {
+                car: scrutinee_sym,
+                cdr: clauses.clone(),
+            })),
+        }));
+
+        // Load and eval
+        self.current().builder.emit_constant(match_form);
+        self.current().builder.emit_op(Op::Eval);
+
         Ok(())
     }
 

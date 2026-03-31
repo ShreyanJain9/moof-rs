@@ -321,41 +321,55 @@ impl VM {
     fn dispatch_call(&mut self, argc: usize, _tail: bool) -> Result<()> {
         let callee_idx = self.stack.len() - 1 - argc;
         let callee = self.stack[callee_idx].clone();
-        let args: Vec<Value> = self.stack[callee_idx + 1..].to_vec();
-        self.stack.truncate(callee_idx);
 
         match &callee {
             Value::Closure(c) => match &c.body {
                 ClosureBody::Bytecode(func) => {
-                    // Push new frame for bytecode closure
-                    let bp = self.stack.len();
-                    // Reserve local slots, fill with args then nil
-                    for i in 0..func.local_count as usize {
-                        let val = args.get(i).cloned().unwrap_or(Value::Nil);
-                        self.stack.push(val);
+                    // Fast path: rearrange stack in-place.
+                    // Stack: [... callee arg0 arg1 ... argN]
+                    // Need:  [... arg0 arg1 ... argN nil nil ...] (local_count slots)
+                    let bp = callee_idx; // callee slot becomes local[0]
+                    // Shift args down over callee slot
+                    for i in 0..argc {
+                        self.stack[callee_idx + i] = self.stack[callee_idx + 1 + i].clone();
+                    }
+                    // Set remaining locals to nil and truncate/extend
+                    let needed = func.local_count as usize;
+                    let current = argc;
+                    if needed > current {
+                        // Pad with nil
+                        self.stack.truncate(bp + current);
+                        for _ in current..needed {
+                            self.stack.push(Value::Nil);
+                        }
+                    } else {
+                        self.stack.truncate(bp + needed);
                     }
                     self.frames.push(CallFrame {
                         func: func.clone(),
                         ip: 0,
                         bp,
                     });
-                    // Execution continues in the main loop
                     Ok(())
                 }
                 ClosureBody::Native(f) => {
+                    let args: Vec<Value> = self.stack[callee_idx + 1..].to_vec();
+                    self.stack.truncate(callee_idx);
                     let result = f(&mut self.interp, args)?;
                     self.stack.push(result);
                     Ok(())
                 }
                 ClosureBody::Expr(_) => {
-                    // Fall back to tree-walker for Expr closures
+                    let args: Vec<Value> = self.stack[callee_idx + 1..].to_vec();
+                    self.stack.truncate(callee_idx);
                     let result = call_closure(&mut self.interp, c, args)?;
                     self.stack.push(result);
                     Ok(())
                 }
             },
             _ => {
-                // Try invoke for class constructors etc.
+                let args: Vec<Value> = self.stack[callee_idx + 1..].to_vec();
+                self.stack.truncate(callee_idx);
                 let result = self.interp.invoke(callee, args)?;
                 self.stack.push(result);
                 Ok(())
