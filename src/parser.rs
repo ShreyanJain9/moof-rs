@@ -1,33 +1,51 @@
-use crate::token::{Token, TokenType, InterpSegment};
-use crate::ast::*;
+use std::rc::Rc;
+
 use crate::error::{MoofError, Result};
 use crate::lexer::Lexer;
+use crate::moofint::MoofInt;
+use crate::symbol::SymbolTable;
+use crate::token::{InterpSegment, Token, TokenType};
+use crate::value::Value;
 
-pub struct Parser {
+// ═════════════════════════════════════════════════════════════════════════════
+// Parser — converts a token stream into cons-list–based Values.
+//
+// The parser absorbs ALL desugaring that the normalizer used to do in v1.
+// Its output is `Vec<Value>` where each Value is a cons list (s-expression)
+// or an atom.  The evaluator operates directly on these Values.
+// ═════════════════════════════════════════════════════════════════════════════
+
+pub struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
+    symbols: &'a mut SymbolTable,
 }
 
-impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
-    }
-
-    pub fn parse_program(&mut self) -> Result<Program> {
-        let mut expressions = Vec::new();
-        while !self.check_eof() {
-            expressions.push(self.parse_expression()?);
+impl<'a> Parser<'a> {
+    pub fn new(tokens: Vec<Token>, symbols: &'a mut SymbolTable) -> Self {
+        Parser {
+            tokens,
+            pos: 0,
+            symbols,
         }
-        Ok(Program { expressions })
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────
+    // ── Public entry point ──────────────────────────────────────────────
+
+    pub fn parse_program(&mut self) -> Result<Vec<Value>> {
+        let mut exprs = Vec::new();
+        while !self.check_eof() {
+            exprs.push(self.parse_expression()?);
+        }
+        Ok(exprs)
+    }
+
+    // ── Token navigation helpers ────────────────────────────────────────
 
     fn current(&self) -> &Token {
         &self.tokens[self.pos]
     }
 
-    #[allow(dead_code)]
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos + 1)
     }
@@ -48,16 +66,6 @@ impl Parser {
 
     fn check_ident(&self, name: &str) -> bool {
         matches!(&self.current().ty, TokenType::Identifier(n) if n == name)
-    }
-
-    #[allow(dead_code)]
-    fn match_token(&mut self, ty: &TokenType) -> bool {
-        if self.check(ty) {
-            self.pos += 1;
-            true
-        } else {
-            false
-        }
     }
 
     fn expect(&mut self, ty: &TokenType, message: &str) -> Result<Token> {
@@ -88,9 +96,32 @@ impl Parser {
         }
     }
 
-    // ── Expression Parsing ───────────────────────────────────────────
+    fn syntax_error(&self, msg: &str) -> MoofError {
+        let tok = self.current();
+        MoofError::syntax(msg, tok.line, tok.column)
+    }
 
-    fn parse_expression(&mut self) -> Result<Expr> {
+    // ── Cons-list construction helpers ───────────────────────────────────
+
+    fn sym(&mut self, name: &str) -> Value {
+        Value::Symbol(self.symbols.intern(name))
+    }
+
+    /// Build a proper cons list from a Vec of Values.
+    fn list(items: Vec<Value>) -> Value {
+        Value::from_slice(&items)
+    }
+
+    /// Build a proper cons list from a slice of Values.
+    fn list_from_slice(items: &[Value]) -> Value {
+        Value::from_slice(items)
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Expression parsing
+    // ═════════════════════════════════════════════════════════════════════
+
+    fn parse_expression(&mut self) -> Result<Value> {
         let tok = self.current().clone();
         match &tok.ty {
             TokenType::LParen => self.parse_s_expression(),
@@ -104,445 +135,234 @@ impl Parser {
             TokenType::Integer(v) => {
                 let v = *v;
                 self.pos += 1;
-                Ok(Expr::Integer(v, Loc::new(tok.line, tok.column)))
+                Ok(Value::Integer(MoofInt::from(v)))
             }
             TokenType::Float(v) => {
                 let v = *v;
                 self.pos += 1;
-                Ok(Expr::Float(v, Loc::new(tok.line, tok.column)))
+                Ok(Value::Float(v))
             }
             TokenType::Str(s) => {
                 let s = s.clone();
                 self.pos += 1;
-                Ok(Expr::Str(s, Loc::new(tok.line, tok.column)))
+                Ok(Value::Str(Rc::from(s.as_str())))
             }
             TokenType::InterpString(segments) => {
                 let segments = segments.clone();
                 self.pos += 1;
-                self.parse_interp_string_token(&segments, tok.line, tok.column)
+                self.parse_interp_string(&segments)
             }
             TokenType::True => {
                 self.pos += 1;
-                Ok(Expr::Bool(true, Loc::new(tok.line, tok.column)))
+                Ok(Value::Bool(true))
             }
             TokenType::False => {
                 self.pos += 1;
-                Ok(Expr::Bool(false, Loc::new(tok.line, tok.column)))
+                Ok(Value::Bool(false))
             }
             TokenType::Nil => {
                 self.pos += 1;
-                Ok(Expr::Nil(Loc::new(tok.line, tok.column)))
+                Ok(Value::Nil)
             }
             TokenType::Identifier(name) => {
                 let name = name.clone();
                 self.pos += 1;
-                Ok(Expr::Identifier(name, Loc::new(tok.line, tok.column)))
+                Ok(Value::Symbol(self.symbols.intern(&name)))
             }
-            _ => Err(MoofError::syntax(
-                format!("Unexpected token {:?}", tok.ty),
-                tok.line,
-                tok.column,
-            )),
+            TokenType::Dot => {
+                // Bare dot — emit as Symbol(".") so evaluator can detect rest params
+                self.pos += 1;
+                Ok(self.sym("."))
+            }
+            _ => {
+                Err(MoofError::syntax(
+                    format!("Unexpected token {:?}", tok.ty),
+                    tok.line,
+                    tok.column,
+                ))
+            }
         }
     }
 
-    // ── S-Expression ─────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    // S-expressions  (...)
+    // ═════════════════════════════════════════════════════════════════════
 
-    fn parse_s_expression(&mut self) -> Result<Expr> {
-        let lparen = self.expect(&TokenType::LParen, "Expected '('")?;
-        let ln = lparen.line;
-        let col = lparen.column;
+    fn parse_s_expression(&mut self) -> Result<Value> {
+        self.expect(&TokenType::LParen, "Expected '('")?;
 
-        // Empty parens -> nil
+        // Empty parens → nil
         if matches!(self.current().ty, TokenType::RParen) {
             self.pos += 1;
-            return Ok(Expr::Nil(Loc::new(ln, col)));
+            return Ok(Value::Nil);
         }
 
-        // Check for special forms
+        // Check for special-form keywords that need parser-level desugaring
         if let TokenType::Identifier(name) = &self.current().ty {
             match name.as_str() {
-                "define" => return self.parse_define(ln, col),
-                "lambda" => return self.parse_lambda(ln, col),
-                "if" => return self.parse_if(ln, col),
-                "let" => return self.parse_let(ln, col),
-                "do" => return self.parse_do(ln, col),
-                "set!" => return self.parse_set_bang(ln, col),
-                "quote" => return self.parse_quote_form(ln, col),
-                "try" => return self.parse_try_catch(ln, col),
-                "cond" => return self.parse_cond(ln, col),
-                "and" => return self.parse_and(ln, col),
-                "or" => return self.parse_or(ln, col),
-                "class" => return self.parse_class(ln, col),
-                "trait" => return self.parse_trait(ln, col),
-                "match" => return self.parse_match(ln, col),
-                "type" => return self.parse_type_def(ln, col),
-                "->" => return self.parse_pipeline(ln, col),
-                "protocol" => return self.parse_protocol(ln, col),
-                "extend" => return self.parse_extend(ln, col),
-                "defmacro" => return self.parse_defmacro(ln, col),
-                "module" => return self.parse_module(ln, col),
-                "use" => return self.parse_use(ln, col),
-                "require" => return self.parse_require(ln, col),
+                "define" => return self.parse_define(),
+                "->" => return self.parse_pipeline(),
                 _ => {}
             }
         }
 
-        self.parse_call(ln, col)
+        // Generic s-expression: parse all sub-expressions, skipping ColonId labels
+        self.parse_generic_sexp()
     }
 
-    fn parse_call(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        let callee = self.parse_expression()?;
-        let mut args = Vec::new();
+    /// Parse a generic s-expression: all elements until `)`, skipping ColonId
+    /// labels (keeping only their values).  Returns a cons list.
+    fn parse_generic_sexp(&mut self) -> Result<Value> {
+        let mut items = Vec::new();
         while !matches!(self.current().ty, TokenType::RParen) {
             if let TokenType::ColonId(_) = &self.current().ty {
-                // Keyword arg: just skip the keyword label, keep the value
-                self.advance();
-                let value = self.parse_expression()?;
-                args.push(value);
+                // In the homoiconic model, ColonId tokens become symbols.
+                // The evaluator handles keyword arg stripping during function calls.
+                let tok = self.advance();
+                let name = extract_colon_id_with_colon(&tok.ty);
+                items.push(Value::Symbol(self.symbols.intern(&name)));
             } else {
-                args.push(self.parse_expression()?);
+                items.push(self.parse_expression()?);
             }
         }
         self.expect(&TokenType::RParen, "Expected ')'")?;
-        Ok(Expr::Call(Box::new(callee), args, Loc::new(ln, col)))
+        Ok(Self::list(items))
     }
 
-    // ── Special Forms ────────────────────────────────────────────────
+    // ── define (only sugar for function shorthand) ───────────────────────
 
-    fn parse_define(&mut self, ln: usize, col: usize) -> Result<Expr> {
+    fn parse_define(&mut self) -> Result<Value> {
         self.pos += 1; // skip 'define'
+        let define_sym = self.sym("define");
 
         if matches!(self.current().ty, TokenType::LParen) {
-            // Function definition: (define (name params...) body)
-            self.pos += 1; // skip (
+            // Function sugar: (define (f x y) body...) → (define f (lambda (x y) body...))
+            self.pos += 1; // skip inner (
             let (name, _, _) = self.expect_identifier("Expected function name")?;
-            let (params, rest_param) = self.parse_params_until(&TokenType::RParen)?;
+            let name_sym = self.sym(&name);
+
+            // Parse params (including possible dot for rest param)
+            let params = self.parse_param_list_until(&TokenType::RParen)?;
             self.expect(&TokenType::RParen, "Expected ')' after params")?;
+
+            // Parse body expressions until outer )
             let body = self.parse_body_until(&TokenType::RParen)?;
             self.expect(&TokenType::RParen, "Expected ')' to close define")?;
-            let lambda = Expr::Lambda(params, rest_param, Box::new(body), Loc::new(ln, col));
-            Ok(Expr::Define(name, Box::new(lambda), Loc::new(ln, col)))
+
+            let lambda_sym = self.sym("lambda");
+            let lambda = Self::list(vec![lambda_sym, params, body]);
+            Ok(Self::list(vec![define_sym, name_sym, lambda]))
         } else {
+            // Variable define: (define name value) — pass through as cons list
             let (name, _, _) = self.expect_identifier("Expected variable name")?;
+            let name_sym = self.sym(&name);
             let value = self.parse_expression()?;
             self.expect(&TokenType::RParen, "Expected ')' to close define")?;
-            Ok(Expr::Define(name, Box::new(value), Loc::new(ln, col)))
+            Ok(Self::list(vec![define_sym, name_sym, value]))
         }
     }
 
-    fn parse_lambda(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'lambda'
-        self.expect(&TokenType::LParen, "Expected '(' for params")?;
-        let (params, rest_param) = self.parse_params_until(&TokenType::RParen)?;
-        self.expect(&TokenType::RParen, "Expected ')' after params")?;
-        let body = self.parse_body_until(&TokenType::RParen)?;
-        self.expect(&TokenType::RParen, "Expected ')' to close lambda")?;
-        Ok(Expr::Lambda(params, rest_param, Box::new(body), Loc::new(ln, col)))
-    }
+    // ── Pipeline (-> ...) ───────────────────────────────────────────────
 
-    fn parse_if(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'if'
-        let condition = self.parse_expression()?;
-        let then_branch = self.parse_expression()?;
-        let else_branch = if matches!(self.current().ty, TokenType::RParen) {
-            None
-        } else {
-            Some(Box::new(self.parse_expression()?))
-        };
-        self.expect(&TokenType::RParen, "Expected ')' to close if")?;
-        Ok(Expr::If(
-            Box::new(condition),
-            Box::new(then_branch),
-            else_branch,
-            Loc::new(ln, col),
-        ))
-    }
-
-    fn parse_let(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'let'
-        self.expect(&TokenType::LParen, "Expected '(' for let bindings")?;
-        let mut bindings = Vec::new();
-        while matches!(self.current().ty, TokenType::LParen) {
-            self.pos += 1; // skip (
-            let (name, _, _) = self.expect_identifier("Expected binding name")?;
-            let value = self.parse_expression()?;
-            self.expect(&TokenType::RParen, "Expected ')' to close binding")?;
-            bindings.push((name, value));
-        }
-        self.expect(&TokenType::RParen, "Expected ')' to close bindings")?;
-        let body = self.parse_body_until(&TokenType::RParen)?;
-        self.expect(&TokenType::RParen, "Expected ')' to close let")?;
-        Ok(Expr::Let(bindings, Box::new(body), Loc::new(ln, col)))
-    }
-
-    fn parse_do(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'do'
-        let mut exprs = Vec::new();
-        while !matches!(self.current().ty, TokenType::RParen) {
-            exprs.push(self.parse_expression()?);
-        }
-        self.expect(&TokenType::RParen, "Expected ')' to close do")?;
-        Ok(Expr::Do(exprs, Loc::new(ln, col)))
-    }
-
-    fn parse_set_bang(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'set!'
-        let (name, _, _) = self.expect_identifier("Expected variable name after set!")?;
-        let value = self.parse_expression()?;
-        self.expect(&TokenType::RParen, "Expected ')' to close set!")?;
-        Ok(Expr::SetBang(name, Box::new(value), Loc::new(ln, col)))
-    }
-
-    fn parse_quote_form(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'quote'
-        let expr = self.parse_expression()?;
-        self.expect(&TokenType::RParen, "Expected ')' to close quote")?;
-        Ok(Expr::Quote(Box::new(expr), Loc::new(ln, col)))
-    }
-
-    fn parse_try_catch(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'try'
-        let body = self.parse_expression()?;
-        self.expect(&TokenType::LParen, "Expected '(catch ...'")?;
-        let (catch_kw, catch_ln, catch_col) = self.expect_identifier("Expected 'catch'")?;
-        if catch_kw != "catch" {
-            return Err(MoofError::syntax(
-                format!("Expected 'catch', got {:?}", catch_kw),
-                catch_ln,
-                catch_col,
-            ));
-        }
-        let (var_name, _, _) = self.expect_identifier("Expected error variable name")?;
-        let handler = self.parse_expression()?;
-        self.expect(&TokenType::RParen, "Expected ')' to close catch")?;
-        self.expect(&TokenType::RParen, "Expected ')' to close try")?;
-        Ok(Expr::TryCatch(
-            Box::new(body),
-            var_name,
-            Box::new(handler),
-            Loc::new(ln, col),
-        ))
-    }
-
-    fn parse_cond(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'cond'
-        let mut clauses: Vec<(Option<Expr>, Expr)> = Vec::new(); // None = else
-        while matches!(self.current().ty, TokenType::LParen) {
-            self.pos += 1; // skip (
-            if self.check_ident("else") {
-                self.pos += 1; // skip 'else'
-                let expr = self.parse_expression()?;
-                self.expect(&TokenType::RParen, "Expected ')' to close else clause")?;
-                clauses.push((None, expr));
-            } else {
-                let test = self.parse_expression()?;
-                let expr = self.parse_expression()?;
-                self.expect(&TokenType::RParen, "Expected ')' to close cond clause")?;
-                clauses.push((Some(test), expr));
-            }
-        }
-        self.expect(&TokenType::RParen, "Expected ')' to close cond")?;
-        // Desugar to nested if: (cond (a b) (c d) (else e)) → (if a b (if c d e))
-        let loc = Loc::new(ln, col);
-        let mut result = Expr::Nil(loc.clone());
-        for (test, body) in clauses.into_iter().rev() {
-            match test {
-                None => result = body,
-                Some(t) => result = Expr::If(Box::new(t), Box::new(body), Some(Box::new(result)), loc.clone()),
-            }
-        }
-        Ok(result)
-    }
-
-    fn parse_and(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'and'
-        let left = self.parse_expression()?;
-        let right = self.parse_expression()?;
-        self.expect(&TokenType::RParen, "Expected ')' to close and")?;
-        // (and a b) → (if a b false)
-        Ok(Expr::If(Box::new(left), Box::new(right), Some(Box::new(Expr::Bool(false, Loc::new(ln, col)))), Loc::new(ln, col)))
-    }
-
-    fn parse_or(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'or'
-        let left = self.parse_expression()?;
-        let right = self.parse_expression()?;
-        self.expect(&TokenType::RParen, "Expected ')' to close or")?;
-        // (or a b) → (let ((__or_tmp a)) (if __or_tmp __or_tmp b))
-        let loc = Loc::new(ln, col);
-        let tmp = format!("__or_{}", ln);
-        let tmp_id = Expr::Identifier(tmp.clone(), loc.clone());
-        Ok(Expr::Let(
-            vec![(tmp.clone(), left)],
-            Box::new(Expr::If(
-                Box::new(tmp_id.clone()),
-                Box::new(tmp_id),
-                Some(Box::new(right)),
-                loc.clone(),
-            )),
-            loc,
-        ))
-    }
-
-    // ── Class & Trait ────────────────────────────────────────────────
-
-    fn parse_class(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'class'
-        let (name, _, _) = self.expect_identifier("Expected class name")?;
-        let mut superclass = None;
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
-        let mut traits = Vec::new();
+    fn parse_pipeline(&mut self) -> Result<Value> {
+        self.pos += 1; // skip '->'
+        let mut current = self.parse_expression()?;
 
         while !matches!(self.current().ty, TokenType::RParen) {
-            self.expect(&TokenType::LParen, "Expected '(' in class body")?;
-            let (clause_kw, clause_ln, clause_col) = self.expect_identifier("Expected clause keyword")?;
-            match clause_kw.as_str() {
-                "extends" => {
-                    let (super_name, _, _) = self.expect_identifier("Expected superclass name")?;
-                    superclass = Some(super_name);
-                    self.expect(&TokenType::RParen, "Expected ')' to close extends")?;
+            current = self.parse_pipeline_step(current)?;
+        }
+        self.expect(&TokenType::RParen, "Expected ')' to close pipeline")?;
+        Ok(current)
+    }
+
+    fn parse_pipeline_step(&mut self, prev: Value) -> Result<Value> {
+        match &self.current().ty {
+            TokenType::LBracket => {
+                // Message send step: [selector args...] → (__send prev "selector" args...)
+                self.pos += 1; // skip [
+
+                if matches!(self.current().ty, TokenType::RBracket) {
+                    return Err(self.syntax_error("Pipeline message step requires a selector"));
                 }
-                "fields" => {
-                    while let TokenType::Identifier(_) = &self.current().ty {
-                        let (f, _, _) = self.expect_identifier("Expected field name")?;
-                        fields.push(f);
+
+                let (selector, args) = self.parse_selector_and_args(&TokenType::RBracket)?;
+                self.expect(&TokenType::RBracket, "Expected ']' to close pipeline step")?;
+
+                let send_sym = self.sym("__send");
+                let mut items = vec![send_sym, prev, Value::Str(Rc::from(selector.as_str()))];
+                items.extend(args);
+                Ok(Self::list(items))
+            }
+            TokenType::LParen => {
+                // Function call step: (func args...) → (func prev args...)
+                self.pos += 1; // skip (
+                let func = self.parse_expression()?;
+                let mut items = vec![func, prev];
+                while !matches!(self.current().ty, TokenType::RParen) {
+                    if let TokenType::ColonId(_) = &self.current().ty {
+                        self.advance();
+                        items.push(self.parse_expression()?);
+                    } else {
+                        items.push(self.parse_expression()?);
                     }
-                    self.expect(&TokenType::RParen, "Expected ')' to close fields")?;
                 }
-                "method" => {
-                    let m = self.parse_method_body(clause_ln, clause_col)?;
-                    methods.push(m);
-                    self.expect(&TokenType::RParen, "Expected ')' to close method clause")?;
-                }
-                "uses" => {
-                    let (trait_name, _, _) = self.expect_identifier("Expected trait name")?;
-                    traits.push(trait_name);
-                    self.expect(&TokenType::RParen, "Expected ')' to close uses")?;
-                }
-                _ => {
-                    return Err(MoofError::syntax(
-                        format!("Unknown class clause: {}", clause_kw),
-                        clause_ln,
-                        clause_col,
-                    ));
-                }
+                self.expect(&TokenType::RParen, "Expected ')' in pipeline step")?;
+                Ok(Self::list(items))
             }
-        }
-
-        self.expect(&TokenType::RParen, "Expected ')' to close class")?;
-        Ok(Expr::ClassDef {
-            name,
-            superclass,
-            fields,
-            methods,
-            traits,
-            loc: Loc::new(ln, col),
-        })
-    }
-
-    fn parse_trait(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'trait'
-        let (name, _, _) = self.expect_identifier("Expected trait name")?;
-        let mut methods = Vec::new();
-
-        while !matches!(self.current().ty, TokenType::RParen) {
-            self.expect(&TokenType::LParen, "Expected '(' in trait body")?;
-            let (method_kw, method_ln, method_col) = self.expect_identifier("Expected 'method'")?;
-            if method_kw != "method" {
-                return Err(MoofError::syntax(
-                    format!("Expected 'method', got {}", method_kw),
-                    method_ln,
-                    method_col,
-                ));
+            TokenType::Identifier(_) => {
+                // Bare identifier step: func → (func prev)
+                let func = self.parse_expression()?;
+                Ok(Self::list(vec![func, prev]))
             }
-            let m = self.parse_method_body(method_ln, method_col)?;
-            methods.push(m);
-            self.expect(&TokenType::RParen, "Expected ')' to close method in trait")?;
-        }
-
-        self.expect(&TokenType::RParen, "Expected ')' to close trait")?;
-        Ok(Expr::TraitDef {
-            name,
-            methods,
-            loc: Loc::new(ln, col),
-        })
-    }
-
-    fn parse_method_body(&mut self, ln: usize, col: usize) -> Result<MethodDef> {
-        if let TokenType::Identifier(_) = &self.current().ty {
-            // Unary or positional method: name [params...] body
-            let (selector, _, _) = self.expect_identifier("Expected selector")?;
-            self.expect(&TokenType::LBracket, "Expected '[' for method params")?;
-            let (params, _rest) = self.parse_params_until(&TokenType::RBracket)?;
-            self.expect(&TokenType::RBracket, "Expected ']' after method params")?;
-            let body = self.parse_body_until(&TokenType::RParen)?;
-            Ok(MethodDef {
-                selector,
-                params,
-                body: Box::new(body),
-                loc: Loc::new(ln, col),
-            })
-        } else if let TokenType::ColonId(_) = &self.current().ty {
-            // Keyword method: key1: [p1] key2: [p2] body
-            let mut selector = String::new();
-            let mut params = Vec::new();
-            while let TokenType::ColonId(_) = &self.current().ty {
-                let kw_tok = self.advance();
-                selector.push_str(&extract_colon_id_with_colon(&kw_tok.ty));
-                self.expect(&TokenType::LBracket, "Expected '[' for keyword param")?;
-                let (p, _) = self.parse_params_until(&TokenType::RBracket)?;
-                params.extend(p);
-                self.expect(&TokenType::RBracket, "Expected ']' after keyword param")?;
+            _ => {
+                Err(self.syntax_error("Expected pipeline step"))
             }
-            let body = self.parse_body_until(&TokenType::RParen)?;
-            Ok(MethodDef {
-                selector,
-                params,
-                body: Box::new(body),
-                loc: Loc::new(ln, col),
-            })
-        } else {
-            let tok = self.current();
-            Err(MoofError::syntax(
-                "Expected method selector",
-                tok.line,
-                tok.column,
-            ))
         }
     }
 
-    // ── Message Send ─────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    // Message sends  [...]
+    // ═════════════════════════════════════════════════════════════════════
 
-    fn parse_message_send(&mut self) -> Result<Expr> {
-        let lbracket = self.expect(&TokenType::LBracket, "Expected '['")?;
-        let ln = lbracket.line;
-        let col = lbracket.column;
+    fn parse_message_send(&mut self) -> Result<Value> {
+        self.expect(&TokenType::LBracket, "Expected '['")?;
+
+        // Empty brackets [] → nil (used as empty param list in method defs)
+        if matches!(self.current().ty, TokenType::RBracket) {
+            self.pos += 1;
+            return Ok(Value::Nil);
+        }
+
         let receiver = self.parse_expression()?;
 
+        // Check for end — unary messages need at least a selector
         if matches!(self.current().ty, TokenType::RBracket) {
+            // This could be [single-expr] which isn't a valid message send.
+            // In Moof syntax this shouldn't happen — treat as error or as a list wrapper.
             let tok = self.current();
             return Err(MoofError::syntax(
-                "Message send requires a selector",
+                "Message send requires a selector after receiver",
                 tok.line,
                 tok.column,
             ));
         }
 
         let (selector, args) = self.parse_selector_and_args(&TokenType::RBracket)?;
-        self.expect(&TokenType::RBracket, "Expected ']' to close message send")?;
-        Ok(Expr::MessageSend(
-            Box::new(receiver),
-            selector,
-            args,
-            Loc::new(ln, col),
-        ))
+        self.expect(&TokenType::RBracket, "Expected ']'")?;
+
+        let send_sym = self.sym("__send");
+        let mut items = vec![send_sym, receiver, Value::Str(Rc::from(selector.as_str()))];
+        items.extend(args);
+        Ok(Self::list(items))
     }
 
-    /// Parse a selector + args, used by both message send and pipeline message step.
-    fn parse_selector_and_args(&mut self, end_token: &TokenType) -> Result<(String, Vec<Expr>)> {
+    /// Parse selector + args.  Handles unary, keyword, and positional forms.
+    fn parse_selector_and_args(
+        &mut self,
+        end_token: &TokenType,
+    ) -> Result<(String, Vec<Value>)> {
         if let TokenType::ColonId(_) = &self.current().ty {
+            // Keyword message: key1: val1 key2: val2
             self.parse_keyword_message()
         } else if let TokenType::Identifier(_) = &self.current().ty {
             let first_tok = self.advance();
@@ -553,10 +373,11 @@ impl Parser {
             };
 
             if self.check(end_token) {
-                // Unary message
+                // Unary message: [obj method]
                 Ok((first_name, Vec::new()))
             } else if let TokenType::ColonId(_) = &self.current().ty {
                 // Mixed: first_name then keyword parts
+                // e.g. [obj insertValue: 1 atIndex: 2] → selector "insertValue:atIndex:"
                 let mut selector = first_name;
                 let mut args = Vec::new();
                 while let TokenType::ColonId(_) = &self.current().ty {
@@ -566,7 +387,7 @@ impl Parser {
                 }
                 Ok((selector, args))
             } else {
-                // Positional args
+                // Positional args: [obj method arg1 arg2]
                 let mut args = Vec::new();
                 while !self.check(end_token) {
                     args.push(self.parse_expression()?);
@@ -583,7 +404,7 @@ impl Parser {
         }
     }
 
-    fn parse_keyword_message(&mut self) -> Result<(String, Vec<Expr>)> {
+    fn parse_keyword_message(&mut self) -> Result<(String, Vec<Value>)> {
         let mut selector = String::new();
         let mut args = Vec::new();
         while let TokenType::ColonId(_) = &self.current().ty {
@@ -594,91 +415,151 @@ impl Parser {
         Ok((selector, args))
     }
 
-    // ── Brace expressions (map literal or block) ─────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    // Brace expressions  {...}
+    // ═════════════════════════════════════════════════════════════════════
 
-    fn parse_brace_expression(&mut self) -> Result<Expr> {
-        let lbrace = self.expect(&TokenType::LBrace, "Expected '{'")?;
-        let ln = lbrace.line;
-        let col = lbrace.column;
+    fn parse_brace_expression(&mut self) -> Result<Value> {
+        self.expect(&TokenType::LBrace, "Expected '{'")?;
 
-        if matches!(self.current().ty, TokenType::Pipe) {
-            return self.parse_block(ln, col);
+        // Empty braces → empty table
+        if matches!(self.current().ty, TokenType::RBrace) {
+            self.pos += 1;
+            let table_sym = self.sym("__table");
+            return Ok(Self::list(vec![table_sym]));
         }
 
-        self.parse_map_literal_body(ln, col)
+        // Block: { |params...| body }
+        if matches!(self.current().ty, TokenType::Pipe) {
+            return self.parse_block();
+        }
+
+        // Determine if this is a hash table or array table
+        self.parse_table_literal()
     }
 
-    fn parse_block(&mut self, ln: usize, col: usize) -> Result<Expr> {
+    fn parse_block(&mut self) -> Result<Value> {
         self.expect(&TokenType::Pipe, "Expected '|' to start block params")?;
-        let mut params = Vec::new();
+        let mut param_vals = Vec::new();
         while !matches!(self.current().ty, TokenType::Pipe) {
+            if matches!(self.current().ty, TokenType::Dot) {
+                // Rest param in block
+                param_vals.push(self.sym("."));
+                self.pos += 1;
+                let (name, _, _) = self.expect_identifier("Expected rest param name")?;
+                param_vals.push(self.sym(&name));
+                break;
+            }
             let (name, _, _) = self.expect_identifier("Expected block parameter name")?;
-            params.push(name);
+            param_vals.push(self.sym(&name));
         }
         self.expect(&TokenType::Pipe, "Expected '|' to end block params")?;
 
-        let mut body_exprs = Vec::new();
-        while !matches!(self.current().ty, TokenType::RBrace) {
-            body_exprs.push(self.parse_expression()?);
-        }
+        let params_list = Self::list(param_vals);
+
+        // Parse body
+        let body = self.parse_body_until(&TokenType::RBrace)?;
         self.expect(&TokenType::RBrace, "Expected '}' to close block")?;
 
-        let body = if body_exprs.len() == 1 {
-            body_exprs.into_iter().next().unwrap()
+        let lambda_sym = self.sym("lambda");
+        Ok(Self::list(vec![lambda_sym, params_list, body]))
+    }
+
+    fn parse_table_literal(&mut self) -> Result<Value> {
+        // Peek to determine hash vs array
+        if let TokenType::ColonId(_) = &self.current().ty {
+            // Hash table: {key: val key2: val2}
+            self.parse_hash_table()
         } else {
-            Expr::Do(body_exprs, Loc::new(ln, col))
-        };
-
-        Ok(Expr::Lambda(params, None, Box::new(body), Loc::new(ln, col)))
-    }
-
-    fn parse_map_literal_body(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        let mut pairs = Vec::new();
-        while !matches!(self.current().ty, TokenType::RBrace) {
-            let kw_tok = self.expect(&TokenType::ColonId(String::new()), "Expected key: in map literal")?;
-            let key = extract_colon_id(&kw_tok.ty);
-            let value = self.parse_expression()?;
-            pairs.push((key, Box::new(value)));
+            // Could be array or hash — parse first element and check
+            // If we see a comma or `}` after the first value, it's array
+            // If we see a ColonId, it's hash mixed in
+            self.parse_array_table()
         }
-        self.expect(&TokenType::RBrace, "Expected '}' to close map")?;
-        Ok(Expr::MapLiteral(pairs, Loc::new(ln, col)))
     }
 
-    // ── Quote Sugar ──────────────────────────────────────────────────
+    fn parse_hash_table(&mut self) -> Result<Value> {
+        let table_sym = self.sym("__table");
+        let mut items = vec![table_sym];
 
-    fn parse_quote_sugar(&mut self) -> Result<Expr> {
-        let qt = self.advance();
+        while !matches!(self.current().ty, TokenType::RBrace) {
+            if let TokenType::ColonId(_) = &self.current().ty {
+                let kw_tok = self.advance();
+                let key = extract_colon_id(&kw_tok.ty);
+                items.push(Value::Str(Rc::from(key.as_str())));
+                items.push(self.parse_expression()?);
+            } else {
+                return Err(self.syntax_error("Expected key: in table literal"));
+            }
+            // Skip optional comma
+            if matches!(self.current().ty, TokenType::Comma) {
+                self.pos += 1;
+            }
+        }
+        self.expect(&TokenType::RBrace, "Expected '}'")?;
+        Ok(Self::list(items))
+    }
+
+    fn parse_array_table(&mut self) -> Result<Value> {
+        let table_array_sym = self.sym("__table-array");
+        let mut items = vec![table_array_sym];
+
+        while !matches!(self.current().ty, TokenType::RBrace) {
+            // If we encounter a ColonId, switch to treating remaining as hash
+            // This handles mixed tables — but for simplicity, once we started
+            // as array, we stay array.  The user spec says detect.
+            // For now: array mode collects values separated by optional commas.
+            items.push(self.parse_expression()?);
+            // Skip optional comma
+            if matches!(self.current().ty, TokenType::Comma) {
+                self.pos += 1;
+            }
+        }
+        self.expect(&TokenType::RBrace, "Expected '}'")?;
+        Ok(Self::list(items))
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Quote sugar
+    // ═════════════════════════════════════════════════════════════════════
+
+    fn parse_quote_sugar(&mut self) -> Result<Value> {
+        self.pos += 1; // skip '
         let expr = self.parse_expression()?;
-        Ok(Expr::Quote(Box::new(expr), Loc::new(qt.line, qt.column)))
+        let quote_sym = self.sym("quote");
+        Ok(Self::list(vec![quote_sym, expr]))
     }
 
-    fn parse_quasiquote_sugar(&mut self) -> Result<Expr> {
-        let bt = self.advance();
+    fn parse_quasiquote_sugar(&mut self) -> Result<Value> {
+        self.pos += 1; // skip `
         let expr = self.parse_expression()?;
-        Ok(Expr::Quasiquote(Box::new(expr), Loc::new(bt.line, bt.column)))
+        let qq_sym = self.sym("quasiquote");
+        Ok(Self::list(vec![qq_sym, expr]))
     }
 
-    fn parse_unquote_sugar(&mut self) -> Result<Expr> {
-        let c = self.advance();
+    fn parse_unquote_sugar(&mut self) -> Result<Value> {
+        self.pos += 1; // skip ,
         let expr = self.parse_expression()?;
-        Ok(Expr::Unquote(Box::new(expr), Loc::new(c.line, c.column)))
+        let uq_sym = self.sym("unquote");
+        Ok(Self::list(vec![uq_sym, expr]))
     }
 
-    fn parse_unquote_splice_sugar(&mut self) -> Result<Expr> {
-        let ca = self.advance();
+    fn parse_unquote_splice_sugar(&mut self) -> Result<Value> {
+        self.pos += 1; // skip ,@
         let expr = self.parse_expression()?;
-        Ok(Expr::UnquoteSplice(Box::new(expr), Loc::new(ca.line, ca.column)))
+        let uqs_sym = self.sym("unquote-splice");
+        Ok(Self::list(vec![uqs_sym, expr]))
     }
 
-    // ── Selector Ref ─────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    // Selector ref:  &name  or  &(key: val ...)
+    // ═════════════════════════════════════════════════════════════════════
 
-    fn parse_selector_ref(&mut self) -> Result<Expr> {
-        let amp = self.advance();
-        let ln = amp.line;
-        let col = amp.column;
+    fn parse_selector_ref(&mut self) -> Result<Value> {
+        self.pos += 1; // skip &
 
         if matches!(self.current().ty, TokenType::LParen) {
-            // &(keyword: arg ...)
+            // &(keyword: arg ...) → (lambda (__r) (__send __r "keyword:" arg ...))
             self.pos += 1; // skip (
             let mut selector = String::new();
             let mut partial_args = Vec::new();
@@ -688,436 +569,94 @@ impl Parser {
                 partial_args.push(self.parse_expression()?);
             }
             self.expect(&TokenType::RParen, "Expected ')' to close selector ref")?;
-            Ok(Expr::SelectorRef(selector, partial_args, Loc::new(ln, col)))
+
+            let lambda_sym = self.sym("lambda");
+            let r_sym = self.sym("__r");
+            let send_sym = self.sym("__send");
+
+            let params = Self::list(vec![r_sym.clone()]);
+            let mut send_items = vec![
+                send_sym,
+                r_sym,
+                Value::Str(Rc::from(selector.as_str())),
+            ];
+            send_items.extend(partial_args);
+            let send_call = Self::list(send_items);
+
+            Ok(Self::list(vec![lambda_sym, params, send_call]))
         } else if let TokenType::Identifier(_) = &self.current().ty {
+            // &name → (lambda (__r) (__send __r "name"))
             let (name, _, _) = self.expect_identifier("Expected selector name")?;
-            Ok(Expr::SelectorRef(name, Vec::new(), Loc::new(ln, col)))
+
+            let lambda_sym = self.sym("lambda");
+            let r_sym = self.sym("__r");
+            let send_sym = self.sym("__send");
+
+            let params = Self::list(vec![r_sym.clone()]);
+            let send_call = Self::list(vec![
+                send_sym,
+                r_sym,
+                Value::Str(Rc::from(name.as_str())),
+            ]);
+
+            Ok(Self::list(vec![lambda_sym, params, send_call]))
         } else {
-            let tok = self.current();
-            Err(MoofError::syntax(
-                "Expected selector name after '&'",
-                tok.line,
-                tok.column,
-            ))
+            Err(self.syntax_error("Expected selector name after '&'"))
         }
     }
 
-    // ── Match ────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    // String interpolation
+    // ═════════════════════════════════════════════════════════════════════
 
-    fn parse_match(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'match'
-        let expr = self.parse_expression()?;
-        let mut clauses = Vec::new();
-        while matches!(self.current().ty, TokenType::LParen) {
-            clauses.push(self.parse_match_clause()?);
-        }
-        self.expect(&TokenType::RParen, "Expected ')' to close match")?;
-        Ok(Expr::Match(Box::new(expr), clauses, Loc::new(ln, col)))
-    }
+    fn parse_interp_string(&mut self, segments: &[InterpSegment]) -> Result<Value> {
+        let interp_sym = self.sym("__str-interp");
+        let mut items = vec![interp_sym];
 
-    fn parse_match_clause(&mut self) -> Result<MatchClause> {
-        self.expect(&TokenType::LParen, "Expected '(' for match clause")?;
-        let pattern = self.parse_pattern()?;
-
-        let guard = if self.check_ident("when") {
-            self.pos += 1; // skip 'when'
-            Some(Box::new(self.parse_expression()?))
-        } else {
-            None
-        };
-
-        let body = self.parse_expression()?;
-        self.expect(&TokenType::RParen, "Expected ')' to close match clause")?;
-        Ok(MatchClause {
-            pattern,
-            guard,
-            body: Box::new(body),
-        })
-    }
-
-    fn parse_pattern(&mut self) -> Result<Pattern> {
-        let tok = self.current().clone();
-        match &tok.ty {
-            TokenType::Integer(v) => {
-                let v = *v;
-                self.pos += 1;
-                Ok(Pattern::Literal(Box::new(Expr::Integer(v, Loc::new(tok.line, tok.column)))))
-            }
-            TokenType::Float(v) => {
-                let v = *v;
-                self.pos += 1;
-                Ok(Pattern::Literal(Box::new(Expr::Float(v, Loc::new(tok.line, tok.column)))))
-            }
-            TokenType::Str(s) => {
-                let s = s.clone();
-                self.pos += 1;
-                Ok(Pattern::Literal(Box::new(Expr::Str(s, Loc::new(tok.line, tok.column)))))
-            }
-            TokenType::True => {
-                self.pos += 1;
-                Ok(Pattern::Literal(Box::new(Expr::Bool(true, Loc::new(tok.line, tok.column)))))
-            }
-            TokenType::False => {
-                self.pos += 1;
-                Ok(Pattern::Literal(Box::new(Expr::Bool(false, Loc::new(tok.line, tok.column)))))
-            }
-            TokenType::Nil => {
-                self.pos += 1;
-                Ok(Pattern::Literal(Box::new(Expr::Nil(Loc::new(tok.line, tok.column)))))
-            }
-            TokenType::Identifier(name) => {
-                let name = name.clone();
-                self.pos += 1;
-                if name == "_" {
-                    Ok(Pattern::Wildcard)
-                } else {
-                    Ok(Pattern::Bind(name))
-                }
-            }
-            TokenType::LBrace => self.parse_map_pattern(),
-            TokenType::LParen => self.parse_list_or_constructor_pattern(),
-            _ => Err(MoofError::syntax(
-                format!("Unexpected token in pattern: {:?}", tok.ty),
-                tok.line,
-                tok.column,
-            )),
-        }
-    }
-
-    fn parse_map_pattern(&mut self) -> Result<Pattern> {
-        self.expect(&TokenType::LBrace, "Expected '{' for map pattern")?;
-        let mut pairs = Vec::new();
-        while !matches!(self.current().ty, TokenType::RBrace) {
-            let kw_tok = self.expect(&TokenType::ColonId(String::new()), "Expected key: in map pattern")?;
-            let key = extract_colon_id(&kw_tok.ty);
-            let pat = self.parse_pattern()?;
-            pairs.push((key, pat));
-        }
-        self.expect(&TokenType::RBrace, "Expected '}' to close map pattern")?;
-        Ok(Pattern::Map(pairs))
-    }
-
-    fn parse_list_or_constructor_pattern(&mut self) -> Result<Pattern> {
-        self.expect(&TokenType::LParen, "Expected '(' for pattern")?;
-
-        // Constructor pattern: (ClassName binding1 binding2)
-        if let TokenType::Identifier(name) = &self.current().ty {
-            if name.starts_with(|c: char| c.is_ascii_uppercase()) {
-                let class_name = name.clone();
-                self.pos += 1;
-                let mut bindings = Vec::new();
-                while !matches!(self.current().ty, TokenType::RParen) {
-                    bindings.push(self.parse_pattern()?);
-                }
-                self.expect(&TokenType::RParen, "Expected ')' to close constructor pattern")?;
-                return Ok(Pattern::Constructor(class_name, bindings));
-            }
-        }
-
-        // If starts with "list", skip it
-        if self.check_ident("list") {
-            self.pos += 1;
-        }
-
-        // List pattern: (elem1 elem2 . rest) or (elem1 elem2)
-        let mut elements = Vec::new();
-        let mut rest = None;
-        while !matches!(self.current().ty, TokenType::RParen) {
-            if matches!(self.current().ty, TokenType::Dot) {
-                self.pos += 1; // skip dot
-                rest = Some(Box::new(self.parse_pattern()?));
-                break;
-            }
-            elements.push(self.parse_pattern()?);
-        }
-        self.expect(&TokenType::RParen, "Expected ')' to close list pattern")?;
-        Ok(Pattern::List(elements, rest))
-    }
-
-    // ── Type Definition ──────────────────────────────────────────────
-
-    fn parse_type_def(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'type'
-        let (name, _, _) = self.expect_identifier("Expected type name")?;
-        let mut variants = Vec::new();
-
-        while !matches!(self.current().ty, TokenType::RParen) {
-            if matches!(self.current().ty, TokenType::LParen) {
-                self.pos += 1; // skip (
-                let (variant_name, _, _) = self.expect_identifier("Expected variant name")?;
-                let mut fields = Vec::new();
-                while let TokenType::Identifier(_) = &self.current().ty {
-                    let (f, _, _) = self.expect_identifier("Expected field name")?;
-                    fields.push(f);
-                }
-                self.expect(&TokenType::RParen, "Expected ')' to close variant")?;
-                variants.push(TypeVariant { name: variant_name, fields });
-            } else if let TokenType::Identifier(_) = &self.current().ty {
-                let (variant_name, _, _) = self.expect_identifier("Expected variant name")?;
-                variants.push(TypeVariant { name: variant_name, fields: Vec::new() });
-            } else {
-                let tok = self.current();
-                return Err(MoofError::syntax(
-                    "Expected variant in type definition",
-                    tok.line,
-                    tok.column,
-                ));
-            }
-        }
-
-        self.expect(&TokenType::RParen, "Expected ')' to close type")?;
-        Ok(Expr::TypeDef(name, variants, Loc::new(ln, col)))
-    }
-
-    // ── Pipeline ─────────────────────────────────────────────────────
-
-    fn parse_pipeline(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip '->'
-        let value = self.parse_expression()?;
-        let mut steps = Vec::new();
-        while !matches!(self.current().ty, TokenType::RParen) {
-            if matches!(self.current().ty, TokenType::LBracket) {
-                steps.push(self.parse_pipeline_message_step()?);
-            } else {
-                steps.push(self.parse_expression()?);
-            }
-        }
-        self.expect(&TokenType::RParen, "Expected ')' to close pipeline")?;
-        Ok(Expr::Pipeline(Box::new(value), steps, Loc::new(ln, col)))
-    }
-
-    fn parse_pipeline_message_step(&mut self) -> Result<Expr> {
-        let lbracket = self.expect(&TokenType::LBracket, "Expected '['")?;
-        let ln = lbracket.line;
-        let col = lbracket.column;
-
-        let placeholder = Expr::Identifier(
-            "__pipeline_placeholder__".to_string(),
-            Loc::new(ln, col),
-        );
-
-        let (selector, args) = self.parse_selector_and_args(&TokenType::RBracket)?;
-        self.expect(&TokenType::RBracket, "Expected ']' to close pipeline message step")?;
-
-        Ok(Expr::MessageSend(
-            Box::new(placeholder),
-            selector,
-            args,
-            Loc::new(ln, col),
-        ))
-    }
-
-    // ── Protocol ─────────────────────────────────────────────────────
-
-    fn parse_protocol(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'protocol'
-        let (name, _, _) = self.expect_identifier("Expected protocol name")?;
-        let mut selectors = Vec::new();
-        while !matches!(self.current().ty, TokenType::RParen) {
-            match &self.current().ty {
-                TokenType::Identifier(_) => {
-                    let (sel, _, _) = self.expect_identifier("Expected selector")?;
-                    selectors.push(sel);
-                }
-                TokenType::ColonId(_) => {
-                    let tok = self.advance();
-                    selectors.push(extract_colon_id_with_colon(&tok.ty));
-                }
-                _ => {
-                    let tok = self.current();
-                    return Err(MoofError::syntax(
-                        "Expected selector in protocol",
-                        tok.line,
-                        tok.column,
-                    ));
-                }
-            }
-        }
-        self.expect(&TokenType::RParen, "Expected ')' to close protocol")?;
-        Ok(Expr::ProtocolDef(name, selectors, Loc::new(ln, col)))
-    }
-
-    // ── Extend ───────────────────────────────────────────────────────
-
-    fn parse_extend(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'extend'
-        let (name, _, _) = self.expect_identifier("Expected class name after extend")?;
-        let mut methods = Vec::new();
-
-        while !matches!(self.current().ty, TokenType::RParen) {
-            self.expect(&TokenType::LParen, "Expected '(' in extend body")?;
-            let (method_kw, method_ln, method_col) = self.expect_identifier("Expected 'method'")?;
-            if method_kw != "method" {
-                return Err(MoofError::syntax(
-                    format!("Expected 'method' in extend, got {}", method_kw),
-                    method_ln,
-                    method_col,
-                ));
-            }
-            let m = self.parse_method_body(method_ln, method_col)?;
-            methods.push(m);
-            self.expect(&TokenType::RParen, "Expected ')' to close method in extend")?;
-        }
-
-        self.expect(&TokenType::RParen, "Expected ')' to close extend")?;
-        Ok(Expr::ClassDef {
-            name,
-            superclass: None,
-            fields: Vec::new(),
-            methods,
-            traits: Vec::new(),
-            loc: Loc::new(ln, col),
-        })
-    }
-
-    // ── DefMacro ─────────────────────────────────────────────────────
-
-    fn parse_defmacro(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'defmacro'
-        let (name, _, _) = self.expect_identifier("Expected macro name")?;
-        self.expect(&TokenType::LParen, "Expected '(' for macro params")?;
-        let mut params = Vec::new();
-        while !matches!(self.current().ty, TokenType::RParen) {
-            if matches!(self.current().ty, TokenType::Dot) {
-                self.pos += 1; // skip dot
-                let (_rest_name, _, _) = self.expect_identifier("Expected rest param name after '.'")?;
-                // DefMacro AST doesn't have rest_param, so we just consume it
-                break;
-            }
-            let (p, _, _) = self.expect_identifier("Expected parameter name")?;
-            params.push(p);
-        }
-        self.expect(&TokenType::RParen, "Expected ')' after macro params")?;
-        let body = self.parse_body_until(&TokenType::RParen)?;
-        self.expect(&TokenType::RParen, "Expected ')' to close defmacro")?;
-        Ok(Expr::DefMacro(name, params, Box::new(body), Loc::new(ln, col)))
-    }
-
-    // ── Module System ────────────────────────────────────────────────
-
-    fn parse_module(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'module'
-        let (name, _, _) = self.expect_identifier("Expected module name")?;
-        let mut exports = Vec::new();
-        let mut body = Vec::new();
-
-        // Check for (export ...) clause
-        if matches!(self.current().ty, TokenType::LParen) {
-            let saved_pos = self.pos;
-            self.pos += 1; // skip (
-            if self.check_ident("export") {
-                self.pos += 1; // skip 'export'
-                while matches!(&self.current().ty, TokenType::Identifier(_) | TokenType::ColonId(_)) {
-                    let tok = self.advance();
-                    match &tok.ty {
-                        TokenType::Identifier(n) => exports.push(n.clone()),
-                        TokenType::ColonId(n) => exports.push(n.clone()),
-                        _ => unreachable!(),
-                    }
-                }
-                self.expect(&TokenType::RParen, "Expected ')' to close export list")?;
-            } else {
-                self.pos = saved_pos; // backtrack
-            }
-        }
-
-        while !matches!(self.current().ty, TokenType::RParen) {
-            body.push(self.parse_expression()?);
-        }
-        self.expect(&TokenType::RParen, "Expected ')' to close module")?;
-        Ok(Expr::ModuleDef(name, exports, body, Loc::new(ln, col)))
-    }
-
-    fn parse_use(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'use'
-        let (module_name, _, _) = self.expect_identifier("Expected module name")?;
-        let mut imports = None;
-        let mut alias_name = None;
-
-        if !matches!(self.current().ty, TokenType::RParen) {
-            if let TokenType::ColonId(kw) = &self.current().ty {
-                if kw == "as:" {
-                    self.pos += 1; // skip as:
-                    let (alias, _, _) = self.expect_identifier("Expected alias name")?;
-                    alias_name = Some(alias);
-                }
-            } else if matches!(self.current().ty, TokenType::LParen) {
-                self.pos += 1; // skip (
-                let mut imp = Vec::new();
-                while matches!(&self.current().ty, TokenType::Identifier(_) | TokenType::ColonId(_)) {
-                    let tok = self.advance();
-                    match &tok.ty {
-                        TokenType::Identifier(n) => imp.push(n.clone()),
-                        TokenType::ColonId(n) => imp.push(n.clone()),
-                        _ => unreachable!(),
-                    }
-                }
-                self.expect(&TokenType::RParen, "Expected ')' to close import list")?;
-                imports = Some(imp);
-            }
-        }
-
-        self.expect(&TokenType::RParen, "Expected ')' to close use")?;
-        Ok(Expr::UseModule(module_name, imports, alias_name, Loc::new(ln, col)))
-    }
-
-    fn parse_require(&mut self, ln: usize, col: usize) -> Result<Expr> {
-        self.pos += 1; // skip 'require'
-        let path_tok = self.expect(&TokenType::Str(String::new()), "Expected file path string")?;
-        let path = if let TokenType::Str(s) = &path_tok.ty {
-            s.clone()
-        } else {
-            unreachable!()
-        };
-        self.expect(&TokenType::RParen, "Expected ')' to close require")?;
-        Ok(Expr::Require(path, Loc::new(ln, col)))
-    }
-
-    // ── Interpolated Strings ─────────────────────────────────────────
-
-    fn parse_interp_string_token(
-        &self,
-        segments: &[InterpSegment],
-        line: usize,
-        col: usize,
-    ) -> Result<Expr> {
-        let mut exprs = Vec::new();
         for seg in segments {
             match seg {
                 InterpSegment::Str(s) => {
-                    exprs.push(Expr::Str(s.clone(), Loc::new(line, col)));
+                    items.push(Value::Str(Rc::from(s.as_str())));
                 }
                 InterpSegment::Expr(src) => {
                     let lexer = Lexer::new(src);
                     let tokens = lexer.tokenize()?;
-                    let mut inner_parser = Parser::new(tokens);
-                    let expr = inner_parser.parse_expression()?;
-                    exprs.push(expr);
+                    let mut sub_parser = Parser::new(tokens, self.symbols);
+                    let expr = sub_parser.parse_expression()?;
+                    items.push(expr);
                 }
             }
         }
-        Ok(Expr::StringInterp(exprs, Loc::new(line, col)))
+
+        Ok(Self::list(items))
     }
 
-    // ── Utility ──────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    // Utility: parameter lists and body parsing
+    // ═════════════════════════════════════════════════════════════════════
 
-    fn parse_params_until(&mut self, end_type: &TokenType) -> Result<(Vec<String>, Option<String>)> {
+    /// Parse a parameter list (as a cons list of symbols, including `.` for rest).
+    /// Consumes tokens until `end_type` is seen (does NOT consume `end_type`).
+    fn parse_param_list_until(&mut self, end_type: &TokenType) -> Result<Value> {
         let mut params = Vec::new();
-        let mut rest_param = None;
         while !self.check(end_type) {
             if matches!(self.current().ty, TokenType::Dot) {
-                self.pos += 1; // skip dot
+                // Rest param marker
+                params.push(self.sym("."));
+                self.pos += 1;
                 let (rest_name, _, _) = self.expect_identifier("Expected rest param name after '.'")?;
-                rest_param = Some(rest_name);
+                params.push(self.sym(&rest_name));
                 break;
             }
             let (name, _, _) = self.expect_identifier("Expected parameter name")?;
-            params.push(name);
+            params.push(self.sym(&name));
         }
-        Ok((params, rest_param))
+        Ok(Self::list(params))
     }
 
-    fn parse_body_until(&mut self, end_type: &TokenType) -> Result<Expr> {
+    /// Parse body expressions until `end_type`.  If multiple, wrap in `(do ...)`.
+    /// Does NOT consume `end_type`.
+    fn parse_body_until(&mut self, end_type: &TokenType) -> Result<Value> {
         let mut exprs = Vec::new();
         while !self.check(end_type) {
             exprs.push(self.parse_expression()?);
@@ -1125,14 +664,19 @@ impl Parser {
         if exprs.len() == 1 {
             Ok(exprs.into_iter().next().unwrap())
         } else {
-            Ok(Expr::Do(exprs, Loc::none()))
+            let do_sym = self.sym("do");
+            let mut items = vec![do_sym];
+            items.extend(exprs);
+            Ok(Self::list(items))
         }
     }
 }
 
-// ── Helper functions ─────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// Helper functions
+// ═════════════════════════════════════════════════════════════════════════════
 
-/// Extract keyword name without trailing colon from a ColonId token type.
+/// Extract keyword name WITHOUT trailing colon from a ColonId token type.
 fn extract_colon_id(ty: &TokenType) -> String {
     if let TokenType::ColonId(s) = ty {
         s.trim_end_matches(':').to_string()

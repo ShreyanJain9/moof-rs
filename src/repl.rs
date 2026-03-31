@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use std::time::Instant;
 
 use rustyline::completion::{Completer, Pair};
@@ -8,16 +9,18 @@ use rustyline::history::FileHistory;
 use rustyline::validate::Validator;
 use rustyline::{Context, Editor, Helper};
 
+use crate::error::{ErrorKind, MoofError};
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
+use crate::moofint::MoofInt;
 use crate::parser::Parser;
-use crate::normalizer::normalize;
 use crate::value::Value;
-use crate::error::MoofError;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HISTORY_FILE: &str = ".moof_history";
 const MAX_HISTORY: usize = 1000;
+
+const STDLIB: &str = include_str!("../stdlib/stdlib.moof");
 
 const TIPS: &[&str] = &[
     "Try [\"hello\" uppercase] to send a message to a string",
@@ -33,15 +36,14 @@ const TIPS: &[&str] = &[
 ];
 
 const KEYWORDS: &[&str] = &[
-    "define", "lambda", "if", "let", "do", "set!", "quote", "try", "catch",
+    "define", "lambda", "fn", "if", "let", "do", "set!", "quote", "try", "catch",
     "cond", "and", "or", "class", "trait", "match", "type", "protocol",
     "extend", "defmacro", "module", "use", "require", "->",
 ];
 
 const META_COMMANDS: &[&str] = &[
     ",help", ",quit", ",exit", ",version", ",env", ",type", ",doc",
-    ",methods", ",classes", ",protocols", ",ast", ",load", ",time",
-    ",clear", ",reset",
+    ",methods", ",classes", ",load", ",time", ",clear", ",reset",
 ];
 
 const COMMON_SELECTORS: &[&str] = &[
@@ -53,45 +55,45 @@ const COMMON_SELECTORS: &[&str] = &[
     "pow:", "max:", "min:", "sqrt",
 ];
 
-const STDLIB: &str = include_str!("../stdlib/stdlib.moof");
-
 // ── Completion ──────────────────────────────────────────────────────
 
 struct MoofHelper {
-    /// Cached completions, rebuilt after each eval.
     completions: Vec<String>,
 }
 
 impl MoofHelper {
     fn new() -> Self {
         let mut completions = Vec::new();
-        for kw in KEYWORDS { completions.push(kw.to_string()); }
-        for mc in META_COMMANDS { completions.push(mc.to_string()); }
-        for sel in COMMON_SELECTORS { completions.push(sel.to_string()); }
+        for kw in KEYWORDS {
+            completions.push(kw.to_string());
+        }
+        for mc in META_COMMANDS {
+            completions.push(mc.to_string());
+        }
+        for sel in COMMON_SELECTORS {
+            completions.push(sel.to_string());
+        }
         MoofHelper { completions }
     }
 
     fn refresh(&mut self, interp: &Interpreter) {
         self.completions.clear();
-        for kw in KEYWORDS { self.completions.push(kw.to_string()); }
-        for mc in META_COMMANDS { self.completions.push(mc.to_string()); }
-        for sel in COMMON_SELECTORS { self.completions.push(sel.to_string()); }
-        // Add environment bindings
-        for (name, _) in interp.global_env.bindings() {
-            if !self.completions.contains(&name) {
-                self.completions.push(name);
-            }
+        for kw in KEYWORDS {
+            self.completions.push(kw.to_string());
         }
-        // Add class names
-        for name in interp.class_registry.keys() {
-            if !self.completions.contains(name) {
-                self.completions.push(name.clone());
-            }
+        for mc in META_COMMANDS {
+            self.completions.push(mc.to_string());
         }
-        // Add protocol names
-        for name in interp.protocol_registry.keys() {
-            if !self.completions.contains(name) {
-                self.completions.push(name.clone());
+        for sel in COMMON_SELECTORS {
+            self.completions.push(sel.to_string());
+        }
+        // Add environment bindings (resolve SymIds to names)
+        for (id, _) in interp.global_env.bindings() {
+            if let Some(name) = interp.symbols.try_name(id) {
+                let s = name.to_string();
+                if !self.completions.contains(&s) {
+                    self.completions.push(s);
+                }
             }
         }
     }
@@ -106,7 +108,6 @@ impl Completer for MoofHelper {
         pos: usize,
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        // Find the word being completed
         let start = line[..pos]
             .rfind(|c: char| c.is_whitespace() || "()[]{}".contains(c))
             .map(|i| i + 1)
@@ -144,9 +145,13 @@ impl Helper for MoofHelper {}
 
 pub fn run_repl() {
     let helper = MoofHelper::new();
-    let mut rl: Editor<MoofHelper, FileHistory> =
-        Editor::with_config(rustyline::Config::builder().max_history_size(MAX_HISTORY).unwrap().build())
-            .expect("Failed to initialize line editor");
+    let mut rl: Editor<MoofHelper, FileHistory> = Editor::with_config(
+        rustyline::Config::builder()
+            .max_history_size(MAX_HISTORY)
+            .unwrap()
+            .build(),
+    )
+    .expect("Failed to initialize line editor");
     rl.set_helper(Some(helper));
 
     let history_path = dirs_or_home().join(HISTORY_FILE);
@@ -155,10 +160,15 @@ pub fn run_repl() {
 
     let mut interp = Interpreter::new();
     load_stdlib(&mut interp);
-    interp.global_env.define("_", Value::Nil, true);
+
+    // Define _ as mutable last-result holder
+    let underscore = interp.symbols.intern("_");
+    interp.global_env.define(underscore, Value::Nil, true);
 
     // Refresh completions after stdlib load
-    if let Some(h) = rl.helper_mut() { h.refresh(&interp); }
+    if let Some(h) = rl.helper_mut() {
+        h.refresh(&interp);
+    }
 
     let start_time = Instant::now();
     let mut eval_count: usize = 0;
@@ -192,7 +202,9 @@ pub fn run_repl() {
                 // Meta commands only when not accumulating
                 if buffer.is_empty() && stripped.starts_with(',') {
                     handle_meta_command(stripped, &mut interp);
-                    if let Some(h) = rl.helper_mut() { h.refresh(&interp); }
+                    if let Some(h) = rl.helper_mut() {
+                        h.refresh(&interp);
+                    }
                     continue;
                 }
 
@@ -214,7 +226,7 @@ pub fn run_repl() {
                 match evaluate_input(&input, &mut interp) {
                     Ok(result) => {
                         eval_count += 1;
-                        interp.global_env.set("_", result.clone()).ok();
+                        let _ = interp.global_env.set(underscore, result.clone());
 
                         let elapsed = eval_start.elapsed().as_secs_f64();
                         let inspected = result.inspect();
@@ -223,7 +235,9 @@ pub fn run_repl() {
                         if elapsed >= 0.1 {
                             println!(
                                 "\x1b[32m=> \x1b[0m{}\x1b[2m : {} [{}]\x1b[0m",
-                                inspected, type_name, format_short_time(elapsed)
+                                inspected,
+                                type_name,
+                                format_short_time(elapsed)
                             );
                         } else {
                             println!(
@@ -238,7 +252,9 @@ pub fn run_repl() {
                 }
 
                 // Refresh completions after eval
-                if let Some(h) = rl.helper_mut() { h.refresh(&interp); }
+                if let Some(h) = rl.helper_mut() {
+                    h.refresh(&interp);
+                }
             }
             Err(ReadlineError::Interrupted) => {
                 if !buffer.is_empty() {
@@ -290,8 +306,6 @@ fn handle_meta_command(input: &str, interp: &mut Interpreter) {
         ",doc" | ",d" => cmd_doc(interp, arg),
         ",methods" | ",m" => cmd_methods(interp, arg),
         ",classes" => cmd_classes(interp),
-        ",protocols" => cmd_protocols(interp),
-        ",ast" => cmd_ast(arg),
         ",load" => cmd_load(interp, arg),
         ",time" => cmd_time(interp, arg),
         ",clear" => print!("\x1b[2J\x1b[H"),
@@ -310,10 +324,8 @@ fn cmd_help() {
     println!("  \x1b[36m,env\x1b[0m   \x1b[36m,e\x1b[0m       Show environment bindings (,env filter)");
     println!("  \x1b[36m,type\x1b[0m  \x1b[36m,t\x1b[0m       Show the type of an expression");
     println!("  \x1b[36m,doc\x1b[0m   \x1b[36m,d\x1b[0m       Show documentation for a binding");
-    println!("  \x1b[36m,methods\x1b[0m \x1b[36m,m\x1b[0m     List methods for a class or value");
+    println!("  \x1b[36m,methods\x1b[0m \x1b[36m,m\x1b[0m     List methods for a class");
     println!("  \x1b[36m,classes\x1b[0m         List all defined classes");
-    println!("  \x1b[36m,protocols\x1b[0m       List all defined protocols");
-    println!("  \x1b[36m,ast\x1b[0m             Show parsed & normalized AST");
     println!("  \x1b[36m,load\x1b[0m            Load a .moof file");
     println!("  \x1b[36m,time\x1b[0m            Benchmark an expression");
     println!("  \x1b[36m,clear\x1b[0m           Clear the screen");
@@ -328,59 +340,45 @@ fn cmd_help() {
 
 fn cmd_env(interp: &Interpreter, filter: &str) {
     let bindings = interp.global_env.bindings();
-    let mut sorted: Vec<_> = bindings.into_iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut entries: Vec<(String, Value)> = bindings
+        .into_iter()
+        .filter_map(|(id, val)| {
+            let name = interp.symbols.try_name(id)?.to_string();
+            Some((name, val))
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Group by type
     let mut functions = Vec::new();
-    let mut classes = Vec::new();
-    let mut protocols = Vec::new();
-    let mut macros = Vec::new();
     let mut values = Vec::new();
 
-    for (name, val) in &sorted {
-        // Skip internals
-        if name.starts_with("__") { continue; }
-        // Apply filter
-        if !filter.is_empty() && !name.contains(filter) { continue; }
+    for (name, val) in &entries {
+        if name.starts_with("__") {
+            continue;
+        }
+        if !filter.is_empty() && !name.contains(filter) {
+            continue;
+        }
 
         match val {
-            Value::Function(_) | Value::Builtin(_, _) => functions.push((name, val)),
-            Value::Class(_) => classes.push((name, val)),
-            Value::Protocol(_) => protocols.push((name, val)),
-            Value::Macro(_) => macros.push((name, val)),
-            _ => values.push((name, val)),
+            Value::Closure(_) => functions.push(name.clone()),
+            _ => values.push((name.clone(), val.clone())),
         }
     }
 
     if !values.is_empty() {
         println!("\x1b[1mValues:\x1b[0m");
         for (name, val) in &values {
-            println!("  \x1b[36m{name}\x1b[0m = {}\x1b[2m : {}\x1b[0m", val.inspect(), val.type_name());
+            println!(
+                "  \x1b[36m{name}\x1b[0m = {}\x1b[2m : {}\x1b[0m",
+                val.inspect(),
+                val.type_name()
+            );
         }
     }
     if !functions.is_empty() {
         println!("\x1b[1mFunctions:\x1b[0m ({} total)", functions.len());
-        let display: Vec<String> = functions.iter().map(|(n, _)| n.to_string()).collect();
-        print_columns(&display, 4);
-    }
-    if !classes.is_empty() {
-        println!("\x1b[1mClasses:\x1b[0m");
-        for (name, _) in &classes {
-            println!("  \x1b[36m{name}\x1b[0m");
-        }
-    }
-    if !protocols.is_empty() {
-        println!("\x1b[1mProtocols:\x1b[0m");
-        for (name, _) in &protocols {
-            println!("  \x1b[36m{name}\x1b[0m");
-        }
-    }
-    if !macros.is_empty() {
-        println!("\x1b[1mMacros:\x1b[0m");
-        for (name, _) in &macros {
-            println!("  \x1b[36m{name}\x1b[0m");
-        }
+        print_columns(&functions, 4);
     }
 }
 
@@ -401,49 +399,40 @@ fn cmd_doc(interp: &mut Interpreter, arg: &str) {
         return;
     }
 
-    // Check class registry
-    if let Some(klass_rc) = interp.class_registry.get(arg) {
-        let klass = klass_rc.borrow();
-        println!("\x1b[1m{}\x1b[0m : \x1b[36mClass\x1b[0m", klass.name);
-        let fields = klass.all_fields();
-        if !fields.is_empty() {
-            println!("  \x1b[2mFields:\x1b[0m {}", fields.join(", "));
-        }
-        if let Some(ref sup) = klass.superclass {
-            println!("  \x1b[2mExtends:\x1b[0m {}", sup.borrow().name);
-        }
-        let methods: Vec<String> = klass.methods.keys().cloned().collect();
-        if !methods.is_empty() {
-            let mut sorted = methods;
-            sorted.sort();
-            println!("  \x1b[2mMethods:\x1b[0m {}", sorted.join(", "));
-        }
-        return;
-    }
-
-    // Check protocol registry
-    if let Some(proto) = interp.protocol_registry.get(arg) {
-        println!("\x1b[1m{}\x1b[0m : \x1b[36mProtocol\x1b[0m", proto.name);
-        println!("  \x1b[2mSelectors:\x1b[0m {}", proto.selectors.join(", "));
-        if !proto.default_methods.is_empty() {
-            let defaults: Vec<String> = proto.default_methods.keys().cloned().collect();
-            println!("  \x1b[2mDefault methods:\x1b[0m {}", defaults.join(", "));
-        }
-        return;
-    }
-
-    // Check bindings
-    match interp.global_env.get(arg) {
+    // Try to look up by name in the global env
+    let id = interp.symbols.intern(arg);
+    match interp.global_env.get(id) {
         Ok(val) => {
             println!("\x1b[1m{arg}\x1b[0m : \x1b[36m{}\x1b[0m", val.type_name());
             match &val {
-                Value::Function(f) => {
-                    let params = f.params.join(" ");
-                    let rest = f.rest_param.as_ref().map(|r| format!(" . {r}")).unwrap_or_default();
-                    println!("  \x1b[2m({arg} {params}{rest})\x1b[0m");
-                }
-                Value::Builtin(name, _) => {
-                    println!("  \x1b[2m<builtin {name}>\x1b[0m");
+                Value::Closure(c) => {
+                    let params: Vec<String> = c
+                        .params
+                        .iter()
+                        .map(|&p| {
+                            interp
+                                .symbols
+                                .try_name(p)
+                                .unwrap_or("?")
+                                .to_string()
+                        })
+                        .collect();
+                    let rest = c
+                        .rest_param
+                        .map(|r| {
+                            format!(
+                                " . {}",
+                                interp.symbols.try_name(r).unwrap_or("?")
+                            )
+                        })
+                        .unwrap_or_default();
+                    let name_str = c
+                        .name
+                        .map(|n| {
+                            interp.symbols.try_name(n).unwrap_or("?").to_string()
+                        })
+                        .unwrap_or_else(|| arg.to_string());
+                    println!("  \x1b[2m({} {}{})\x1b[0m", name_str, params.join(" "), rest);
                 }
                 other => {
                     println!("  {}", other.inspect());
@@ -456,159 +445,95 @@ fn cmd_doc(interp: &mut Interpreter, arg: &str) {
     }
 }
 
-fn cmd_methods(interp: &Interpreter, arg: &str) {
+fn cmd_methods(interp: &mut Interpreter, arg: &str) {
     if arg.is_empty() {
         println!("\x1b[2mUsage: ,methods <ClassName>\x1b[0m");
         return;
     }
 
-    let class_name = match arg {
-        "Integer" | "Float" | "String" | "List" | "Map" | "Bool" | "Nil" | "Function" => arg.to_string(),
-        _ => arg.to_string(),
-    };
+    let class_opt = interp.class_of_name(arg);
+    match class_opt {
+        Some(class_rc) => {
+            let klass = class_rc.borrow();
+            println!("\x1b[1m{arg}\x1b[0m methods:");
 
-    if let Some(klass_rc) = interp.class_registry.get(&class_name) {
-        let klass = klass_rc.borrow();
-        println!("\x1b[1m{}\x1b[0m methods:", class_name);
+            let mut method_names: Vec<String> = klass
+                .methods
+                .keys()
+                .filter_map(|&id| interp.symbols.try_name(id).map(|s| s.to_string()))
+                .collect();
+            method_names.sort();
 
-        let mut builtins = Vec::new();
-        let mut user_defined = Vec::new();
-
-        for (name, method) in &klass.methods {
-            match method {
-                crate::value::Method::Builtin(_, _) => builtins.push(name.clone()),
-                crate::value::Method::UserDefined(_) => user_defined.push(name.clone()),
+            if method_names.is_empty() {
+                println!("  \x1b[2m(no methods)\x1b[0m");
+            } else {
+                println!("  {}", method_names.join(", "));
             }
-        }
 
-        // Walk superclass chain
-        let mut sup = klass.superclass.clone();
-        drop(klass);
-        let mut inherited = Vec::new();
-        while let Some(s) = sup {
-            let sb = s.borrow();
-            for name in sb.methods.keys() {
-                if !builtins.contains(name) && !user_defined.contains(name) && !inherited.contains(name) {
-                    inherited.push(name.clone());
+            // Walk superclass chain
+            let mut sup = klass.superclass.clone();
+            drop(klass);
+            let mut inherited = Vec::new();
+            while let Some(s) = sup {
+                let sb = s.borrow();
+                for &id in sb.methods.keys() {
+                    if let Some(name) = interp.symbols.try_name(id) {
+                        let name_s = name.to_string();
+                        if !method_names.contains(&name_s) && !inherited.contains(&name_s) {
+                            inherited.push(name_s);
+                        }
+                    }
                 }
+                sup = sb.superclass.clone();
             }
-            sup = sb.superclass.clone();
-        }
 
-        builtins.sort();
-        user_defined.sort();
-        inherited.sort();
-
-        if !builtins.is_empty() {
-            println!("  \x1b[2mBuilt-in:\x1b[0m {}", builtins.join(", "));
+            if !inherited.is_empty() {
+                inherited.sort();
+                println!("  \x1b[2mInherited:\x1b[0m {}", inherited.join(", "));
+            }
         }
-        if !user_defined.is_empty() {
-            println!("  \x1b[2mUser-defined:\x1b[0m {}", user_defined.join(", "));
+        None => {
+            println!("\x1b[2mNo class found: '{arg}'\x1b[0m");
         }
-        if !inherited.is_empty() {
-            println!("  \x1b[2mInherited:\x1b[0m {}", inherited.join(", "));
-        }
-        if builtins.is_empty() && user_defined.is_empty() && inherited.is_empty() {
-            println!("  \x1b[2m(no methods)\x1b[0m");
-        }
-    } else {
-        println!("\x1b[2mNo class found: '{arg}'\x1b[0m");
     }
 }
 
 fn cmd_classes(interp: &Interpreter) {
-    let mut builtin_types = Vec::new();
-    let mut user_classes = Vec::new();
-    let mut adt_variants = Vec::new();
+    let builtin_names = [
+        "Integer", "Float", "String", "Cons", "Table", "Bool", "True", "False", "Nil", "Closure",
+    ];
 
-    let adt_names: Vec<String> = interp.type_registry.values().flatten().cloned().collect();
+    let mut builtin_list = Vec::new();
+    let mut user_list = Vec::new();
 
-    for (name, klass_rc) in &interp.class_registry {
-        let klass = klass_rc.borrow();
-        let is_builtin = matches!(
-            name.as_str(),
-            "Integer" | "Float" | "String" | "List" | "Map" | "Bool" | "Nil" | "Function"
-        );
-
-        if is_builtin {
-            let user_methods: Vec<String> = klass.methods.iter()
-                .filter(|(_, m)| matches!(m, crate::value::Method::UserDefined(_)))
-                .map(|(n, _)| n.clone())
-                .collect();
-            if user_methods.is_empty() {
-                builtin_types.push(name.clone());
+    for (name, class_rc) in interp.all_classes() {
+        let klass = class_rc.borrow();
+        let method_count = klass.methods.len();
+        if builtin_names.contains(&name.as_str()) {
+            if method_count > 0 {
+                builtin_list.push(format!("{name} ({method_count} methods)"));
             } else {
-                builtin_types.push(format!("{name} (+{})", user_methods.len()));
+                builtin_list.push(name);
             }
-        } else if adt_names.contains(name) {
-            adt_variants.push(name.clone());
         } else {
-            let field_count = klass.all_fields().len();
-            let method_count = klass.methods.len();
+            let field_count = klass.all_field_names().len();
             if field_count > 0 || method_count > 0 {
-                user_classes.push(format!("{name} ({field_count} fields, {method_count} methods)"));
+                user_list.push(format!("{name} ({field_count} fields, {method_count} methods)"));
             } else {
-                user_classes.push(name.clone());
+                user_list.push(name);
             }
         }
     }
 
-    builtin_types.sort();
-    user_classes.sort();
-    adt_variants.sort();
+    builtin_list.sort();
+    user_list.sort();
 
-    println!("\x1b[1mBuilt-in types:\x1b[0m {}", builtin_types.join(", "));
-    if !user_classes.is_empty() {
+    println!("\x1b[1mBuilt-in types:\x1b[0m {}", builtin_list.join(", "));
+    if !user_list.is_empty() {
         println!("\x1b[1mUser classes:\x1b[0m");
-        for c in &user_classes {
+        for c in &user_list {
             println!("  \x1b[36m{c}\x1b[0m");
         }
-    }
-    if !adt_variants.is_empty() {
-        // Group by type
-        for (type_name, variants) in &interp.type_registry {
-            println!("\x1b[1mADT {type_name}:\x1b[0m {}", variants.join(" | "));
-        }
-    }
-}
-
-fn cmd_protocols(interp: &Interpreter) {
-    if interp.protocol_registry.is_empty() {
-        println!("\x1b[2mNo protocols defined\x1b[0m");
-        return;
-    }
-    for (name, proto) in &interp.protocol_registry {
-        let has_defaults = if proto.default_methods.is_empty() { "" } else { " (has defaults)" };
-        println!(
-            "\x1b[1m{name}\x1b[0m\x1b[2m{has_defaults}\x1b[0m: {}",
-            proto.selectors.join(", ")
-        );
-    }
-}
-
-fn cmd_ast(arg: &str) {
-    if arg.is_empty() {
-        println!("\x1b[2mUsage: ,ast <expr>\x1b[0m");
-        return;
-    }
-    match Lexer::new(arg).tokenize() {
-        Ok(tokens) => {
-            match Parser::new(tokens).parse_program() {
-                Ok(program) => {
-                    println!("\x1b[1mParsed:\x1b[0m");
-                    for expr in &program.expressions {
-                        println!("  {:?}", expr);
-                    }
-                    let normalized = normalize(program);
-                    println!("\x1b[1mNormalized:\x1b[0m");
-                    for expr in &normalized.expressions {
-                        println!("  {:?}", expr);
-                    }
-                }
-                Err(e) => print_error(&e, arg),
-            }
-        }
-        Err(e) => print_error(&e, arg),
     }
 }
 
@@ -623,12 +548,10 @@ fn cmd_load(interp: &mut Interpreter, arg: &str) {
         format!("{arg}.moof")
     };
     match std::fs::read_to_string(&path) {
-        Ok(source) => {
-            match interp.load_source(&source, &path) {
-                Ok(_) => println!("\x1b[32mLoaded {path}\x1b[0m"),
-                Err(e) => print_error(&e, &source),
-            }
-        }
+        Ok(source) => match interp.load_source(&source, &path) {
+            Ok(_) => println!("\x1b[32mLoaded {path}\x1b[0m"),
+            Err(e) => print_error(&e, &source),
+        },
         Err(e) => println!("\x1b[31mCannot read '{path}': {e}\x1b[0m"),
     }
 }
@@ -644,7 +567,8 @@ fn cmd_time(interp: &mut Interpreter, arg: &str) {
             let elapsed = start.elapsed().as_secs_f64();
             println!(
                 "\x1b[32m=> \x1b[0m{}\x1b[2m : {}\x1b[0m",
-                result.inspect(), result.type_name()
+                result.inspect(),
+                result.type_name()
             );
             println!("\x1b[2mTime: {}\x1b[0m", format_short_time(elapsed));
         }
@@ -655,7 +579,8 @@ fn cmd_time(interp: &mut Interpreter, arg: &str) {
 fn cmd_reset(interp: &mut Interpreter) {
     *interp = Interpreter::new();
     load_stdlib(interp);
-    interp.global_env.define("_", Value::Nil, true);
+    let underscore = interp.symbols.intern("_");
+    interp.global_env.define(underscore, Value::Nil, true);
     println!("\x1b[32mInterpreter reset to fresh state\x1b[0m");
 }
 
@@ -670,7 +595,10 @@ fn dirs_or_home() -> std::path::PathBuf {
 fn load_stdlib(interp: &mut Interpreter) {
     if !STDLIB.trim().is_empty() {
         if let Err(e) = interp.load_source(STDLIB, "<stdlib>") {
-            eprintln!("\x1b[33mWarning: failed to load stdlib: {}\x1b[0m", e.message);
+            eprintln!(
+                "\x1b[33mWarning: failed to load stdlib: {}\x1b[0m",
+                e.message
+            );
         }
     }
 }
@@ -694,13 +622,13 @@ fn print_banner() {
 
 fn print_error(e: &MoofError, source: &str) {
     let kind_label = match e.kind {
-        crate::error::ErrorKind::Syntax => "SyntaxError",
-        crate::error::ErrorKind::Runtime => "RuntimeError",
-        crate::error::ErrorKind::Name => "NameError",
-        crate::error::ErrorKind::Message => "MessageError",
-        crate::error::ErrorKind::Arity => "ArityError",
-        crate::error::ErrorKind::ImmutableBinding => "ImmutableError",
-        crate::error::ErrorKind::Type => "TypeError",
+        ErrorKind::Syntax => "SyntaxError",
+        ErrorKind::Runtime => "RuntimeError",
+        ErrorKind::Name => "NameError",
+        ErrorKind::Message => "MessageError",
+        ErrorKind::Arity => "ArityError",
+        ErrorKind::Type => "TypeError",
+        ErrorKind::IO => "IOError",
     };
     eprintln!("\x1b[31m{kind_label}: {}\x1b[0m", e.message);
 
@@ -721,9 +649,8 @@ fn print_error(e: &MoofError, source: &str) {
 
 fn evaluate_input(input: &str, interp: &mut Interpreter) -> Result<Value, MoofError> {
     let tokens = Lexer::new(input).tokenize()?;
-    let program = Parser::new(tokens).parse_program()?;
-    let normalized = normalize(program);
-    interp.evaluate(&normalized)
+    let exprs = Parser::new(tokens, &mut interp.symbols).parse_program()?;
+    interp.evaluate_program(&exprs)
 }
 
 fn is_balanced(source: &str) -> bool {
@@ -745,31 +672,50 @@ fn is_balanced(source: &str) -> bool {
 
         if in_block_comment {
             if ch == '#' && nch == Some('|') {
-                block_depth += 1; i += 2; continue;
+                block_depth += 1;
+                i += 2;
+                continue;
             } else if ch == '|' && nch == Some('#') {
                 block_depth -= 1;
-                if block_depth == 0 { in_block_comment = false; }
-                i += 2; continue;
+                if block_depth == 0 {
+                    in_block_comment = false;
+                }
+                i += 2;
+                continue;
             }
-            i += 1; continue;
+            i += 1;
+            continue;
         }
         if in_line_comment {
-            if ch == '\n' { in_line_comment = false; }
-            i += 1; continue;
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
         }
-        if escape { escape = false; i += 1; continue; }
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
         if in_string {
             match ch {
                 '\\' => escape = true,
                 '"' => in_string = false,
                 _ => {}
             }
-            i += 1; continue;
+            i += 1;
+            continue;
         }
 
         match ch {
             ';' => in_line_comment = true,
-            '#' if nch == Some('|') => { in_block_comment = true; block_depth = 1; i += 2; continue; }
+            '#' if nch == Some('|') => {
+                in_block_comment = true;
+                block_depth = 1;
+                i += 2;
+                continue;
+            }
             '"' => in_string = true,
             '(' => depth_paren += 1,
             ')' => depth_paren -= 1,
@@ -782,27 +728,41 @@ fn is_balanced(source: &str) -> bool {
         i += 1;
     }
 
-    if in_string || in_block_comment { return false; }
+    if in_string || in_block_comment {
+        return false;
+    }
     depth_paren <= 0 && depth_bracket <= 0 && depth_brace <= 0
 }
 
 fn format_duration(seconds: f64) -> String {
-    if seconds < 60.0 { format!("{:.1}s", seconds) }
-    else if seconds < 3600.0 { format!("{:.1}m", seconds / 60.0) }
-    else { format!("{:.1}h", seconds / 3600.0) }
+    if seconds < 60.0 {
+        format!("{:.1}s", seconds)
+    } else if seconds < 3600.0 {
+        format!("{:.1}m", seconds / 60.0)
+    } else {
+        format!("{:.1}h", seconds / 3600.0)
+    }
 }
 
 fn format_short_time(seconds: f64) -> String {
-    if seconds < 0.001 { format!("{:.0}µs", seconds * 1_000_000.0) }
-    else if seconds < 1.0 { format!("{:.1}ms", seconds * 1_000.0) }
-    else { format!("{:.2}s", seconds) }
+    if seconds < 0.001 {
+        format!("{:.0}us", seconds * 1_000_000.0)
+    } else if seconds < 1.0 {
+        format!("{:.1}ms", seconds * 1_000.0)
+    } else {
+        format!("{:.2}s", seconds)
+    }
 }
 
 fn print_columns(items: &[String], cols: usize) {
     let max_width = items.iter().map(|s| s.len()).max().unwrap_or(10) + 2;
     for (i, item) in items.iter().enumerate() {
         print!("  {item:<width$}", width = max_width);
-        if (i + 1) % cols == 0 { println!(); }
+        if (i + 1) % cols == 0 {
+            println!();
+        }
     }
-    if items.len() % cols != 0 { println!(); }
+    if items.len() % cols != 0 {
+        println!();
+    }
 }

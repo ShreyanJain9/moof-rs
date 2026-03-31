@@ -1,14 +1,12 @@
 pub mod token;
 pub mod error;
-pub mod ast;
+pub mod symbol;
+pub mod moofint;
+pub mod cons;
 pub mod value;
 pub mod environment;
 pub mod lexer;
 pub mod parser;
-pub mod normalizer;
 pub mod interpreter;
 pub mod builtins;
-pub mod builtin_methods;
-pub mod methods;
-pub mod pattern_matcher;
 pub mod repl;

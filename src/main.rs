@@ -1,7 +1,6 @@
 use moof::interpreter::Interpreter;
 use moof::lexer::Lexer;
 use moof::parser::Parser;
-use moof::normalizer::normalize;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const STDLIB: &str = include_str!("../stdlib/stdlib.moof");
@@ -29,7 +28,7 @@ fn main() {
         match std::fs::read_to_string(path) {
             Ok(source) => run_source(&source, path, false),
             Err(e) => {
-                eprintln!("Error: Cannot read file '{}': {}", path, e);
+                eprintln!("Error: Cannot read '{}': {}", path, e);
                 std::process::exit(1);
             }
         }
@@ -50,11 +49,11 @@ fn print_usage() {
     println!("  moof -e '(+ 1 2)'     Evaluate and print");
 }
 
-fn run_source(source: &str, _filename: &str, print_result: bool) {
+fn run_source(source: &str, filename: &str, print_result: bool) {
     let mut interp = Interpreter::new();
     load_stdlib(&mut interp);
 
-    match evaluate(source, &mut interp) {
+    match interp.load_source(source, filename) {
         Ok(result) => {
             if print_result {
                 match result {
@@ -70,8 +69,8 @@ fn run_source(source: &str, _filename: &str, print_result: bool) {
                 moof::error::ErrorKind::Name => "NameError",
                 moof::error::ErrorKind::Message => "MessageError",
                 moof::error::ErrorKind::Arity => "ArityError",
-                moof::error::ErrorKind::ImmutableBinding => "ImmutableError",
                 moof::error::ErrorKind::Type => "TypeError",
+                moof::error::ErrorKind::IO => "IOError",
             };
 
             eprintln!("\x1b[31m{kind_label}: {}\x1b[0m", e.message);
@@ -79,7 +78,11 @@ fn run_source(source: &str, _filename: &str, print_result: bool) {
             if let Some(line_num) = e.line {
                 let lines: Vec<&str> = source.lines().collect();
                 if line_num > 0 && line_num <= lines.len() {
-                    eprintln!("\x1b[2m  {} | {}\x1b[0m", line_num, lines[line_num - 1]);
+                    eprintln!(
+                        "\x1b[2m  {} | {}\x1b[0m",
+                        line_num,
+                        lines[line_num - 1]
+                    );
                     if let Some(col) = e.column {
                         if col > 0 {
                             let padding =
@@ -104,14 +107,4 @@ fn load_stdlib(interp: &mut Interpreter) {
             );
         }
     }
-}
-
-fn evaluate(
-    source: &str,
-    interp: &mut Interpreter,
-) -> Result<moof::value::Value, moof::error::MoofError> {
-    let tokens = Lexer::new(source).tokenize()?;
-    let program = Parser::new(tokens).parse_program()?;
-    let normalized = normalize(program);
-    interp.evaluate(&normalized)
 }

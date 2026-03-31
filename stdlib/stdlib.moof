@@ -257,55 +257,55 @@
 ;; ── Built-in Type Extensions (methods written in Moof) ────────────
 
 (class Integer
-  (method even? [] (= (% self 2) 0))
-  (method odd?  [] (not [self even?]))
-  (method times: [f] (for-each f (range self)))
-  (method to: [n] (range self (+ n 1)))
-  (method downto: [n]
+  (method even? ()(= (% self 2) 0))
+  (method odd?  ()(not [self even?]))
+  (method times: (f) (for-each f (range self)))
+  (method to: (n) (range self (+ n 1)))
+  (method downto: (n)
     (if (< self n) (list)
       (cons self [(- self 1) downto: n]))))
 
 (class Float
-  (method round: [places]
+  (method round: (places)
     (let ((factor (power 10 places)))
       (/ (* self factor) factor)))
-  (method floor [] [self to_i])
-  (method ceil  [] (if (= self [self to_i]) [self to_i] (+ [self to_i] 1))))
+  (method floor () [self to_i])
+  (method ceil () (if (= self [self to_i]) [self to_i] (+ [self to_i] 1))))
 
 (class String
-  (method empty?    [] (= [self length] 0))
-  (method blank?    [] [self empty?])
-  (method words     [] (filter { |w| (not [w empty?]) } [[self trim] split: " "]))
-  (method lines     [] [self split: "\n"])
-  (method repeat:   [n] (string-repeat self n))
-  (method includes: [s] [self contains: s])
-  (method first:    [n] [self slice: 0 length: n])
-  (method last:     [n] [self slice: (- [self length] n) length: n]))
+  (method empty? () (= [self length] 0))
+  (method blank? () [self empty?])
+  (method words () (filter { |w| (not [w empty?]) } [[self trim] split: " "]))
+  (method lines () [self split: "\n"])
+  (method repeat: (n) (string-repeat self n))
+  (method includes: (s) [self contains: s])
+  (method first: (n) [self slice: 0 length: n])
+  (method last: (n) [self slice: (- [self length] n) length: n]))
 
 (class List
-  (method sum       [] (reduce + 0 self))
-  (method product   [] (reduce * 1 self))
-  (method min       [] (reduce min (car self) (cdr self)))
-  (method max       [] (reduce max (car self) (cdr self)))
-  (method compact   [] (filter { |x| (not (nil? x)) } self))
-  (method enumerate [] [self zip: (range [self length])])
-  (method second    [] [self at: 1])
-  (method third     [] [self at: 2])
-  (method flat-map: [f] (flatten [self map: f]))
-  (method count:    [pred] [self length]))
+  (method sum () (reduce + 0 self))
+  (method product () (reduce * 1 self))
+  (method min () (reduce min (car self) (cdr self)))
+  (method max () (reduce max (car self) (cdr self)))
+  (method compact () (filter { |x| (not (nil? x)) } self))
+  (method enumerate () [self zip: (range [self length])])
+  (method second () [self at: 1])
+  (method third () [self at: 2])
+  (method flat-map: (f) (flatten [self map: f]))
+  (method count: (pred) [self length]))
 
 (class Map
-  (method each: [f]
+  (method each: (f)
     (for-each { |k| (f k [self at: k]) } [self keys])
     nil)
-  (method map-values: [f]
+  (method map-values: (f)
     (reduce { |acc k| [acc put: k value: (f [self at: k])] }
       {} [self keys]))
-  (method select: [pred]
+  (method select: (pred)
     (reduce { |acc k|
       (if (pred k [self at: k])
         [acc put: k value: [self at: k]]
         acc)}
       {} [self keys]))
-  (method reject: [pred]
+  (method reject: (pred)
     [self select: { |k v| (not (pred k v)) }]))
