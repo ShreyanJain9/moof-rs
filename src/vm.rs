@@ -36,6 +36,14 @@ impl CallFrame {
     }
 }
 
+/// Monomorphic inline cache entry for a Send site.
+struct InlineCache {
+    /// Raw pointer to the class (for identity comparison)
+    class_ptr: usize,
+    /// Cached method value
+    method: Value,
+}
+
 pub struct VM {
     /// The tree-walking interpreter (for builtins, class system, symbol table)
     pub interp: Interpreter,
@@ -43,14 +51,21 @@ pub struct VM {
     stack: Vec<Value>,
     /// Call frame stack
     frames: Vec<CallFrame>,
+    /// Inline cache: keyed by (func_ptr, bytecode_offset) pair
+    /// Using a flat Vec indexed by a hash for speed.
+    send_cache: Vec<Option<InlineCache>>,
 }
 
 impl VM {
     pub fn new(interp: Interpreter) -> Self {
+        // Pre-allocate cache with 1024 slots (power of 2 for fast modulo)
+        let mut send_cache = Vec::with_capacity(1024);
+        send_cache.resize_with(1024, || None);
         VM {
             interp,
             stack: Vec::with_capacity(256),
             frames: Vec::with_capacity(64),
+            send_cache,
         }
     }
 
@@ -146,15 +161,18 @@ impl VM {
                 }
 
                 Op::Send => {
+                    // Cache key: the bytecode offset of this Send instruction
+                    let cache_key = (Rc::as_ptr(&frame.func) as usize)
+                        .wrapping_add(frame.ip - 1); // ip was advanced past opcode
                     let selector = frame.read_u16() as u32;
                     let argc = frame.read_u8() as usize;
-                    self.dispatch_send(selector, argc)?;
+                    self.dispatch_send_cached(selector, argc, cache_key)?;
                 }
 
                 Op::TailSend => {
                     let selector = frame.read_u16() as u32;
                     let argc = frame.read_u8() as usize;
-                    // For Phase 1: just do a normal send (no TCO yet)
+                    // For now, same as Send (message sends go through interp which has its own TCO)
                     self.dispatch_send(selector, argc)?;
                 }
 
@@ -214,8 +232,7 @@ impl VM {
 
                 Op::TailCall => {
                     let argc = frame.read_u8() as usize;
-                    // Phase 1: for now, just do a regular call
-                    self.dispatch_call(argc, false)?;
+                    self.dispatch_tail_call(argc)?;
                 }
 
                 Op::MakeClosure => {
@@ -346,7 +363,103 @@ impl VM {
         }
     }
 
-    /// Dispatch a message send. Stack: [receiver arg1 ... argN]
+    /// Dispatch a tail call — reuse current frame for bytecode-to-bytecode calls.
+    fn dispatch_tail_call(&mut self, argc: usize) -> Result<()> {
+        let callee_idx = self.stack.len() - 1 - argc;
+        let callee = self.stack[callee_idx].clone();
+
+        // Only optimize bytecode-to-bytecode tail calls
+        if let Value::Closure(ref c) = callee {
+            if let ClosureBody::Bytecode(ref func) = c.body {
+                let args: Vec<Value> = self.stack[callee_idx + 1..].to_vec();
+                self.stack.truncate(callee_idx);
+
+                let frame = self.frames.last_mut().unwrap();
+                let bp = frame.bp;
+
+                // Overwrite locals with new args, pad with nil
+                for i in 0..func.local_count as usize {
+                    let val = args.get(i).cloned().unwrap_or(Value::Nil);
+                    if bp + i < self.stack.len() {
+                        self.stack[bp + i] = val;
+                    } else {
+                        self.stack.push(val);
+                    }
+                }
+                // Truncate operand stack above locals
+                self.stack.truncate(bp + func.local_count as usize);
+                frame.func = func.clone();
+                frame.ip = 0;
+                return Ok(());
+            }
+        }
+
+        // Non-bytecode: fall back to regular call
+        self.dispatch_call(argc, false)
+    }
+
+    /// Dispatch a message send with inline caching.
+    fn dispatch_send_cached(&mut self, selector: u32, argc: usize, cache_key: usize) -> Result<()> {
+        let receiver_idx = self.stack.len() - 1 - argc;
+        let receiver = self.stack[receiver_idx].clone();
+
+        let class = self.interp.class_of(&receiver);
+        let class_ptr = Rc::as_ptr(&class) as usize;
+        let cache_slot = cache_key & 0x3FF; // mod 1024
+
+        // Check inline cache
+        let cached_method = if let Some(ref entry) = self.send_cache[cache_slot] {
+            if entry.class_ptr == class_ptr {
+                Some(entry.method.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let method = if let Some(m) = cached_method {
+            m
+        } else {
+            // Cache miss: full lookup
+            let m = class.borrow().lookup(selector);
+            if let Some(ref method_val) = m {
+                // Update cache
+                self.send_cache[cache_slot] = Some(InlineCache {
+                    class_ptr,
+                    method: method_val.clone(),
+                });
+            }
+            match m {
+                Some(method_val) => method_val,
+                None => {
+                    // Fall back to full send_message (handles field access, doesNotUnderstand:)
+                    let args: Vec<Value> = self.stack[receiver_idx + 1..].to_vec();
+                    self.stack.truncate(receiver_idx);
+                    let result = self.interp.send_message(receiver, selector, args)?;
+                    self.stack.push(result);
+                    return Ok(());
+                }
+            }
+        };
+
+        // Fast path: call the method directly
+        let args: Vec<Value> = self.stack[receiver_idx + 1..].to_vec();
+        self.stack.truncate(receiver_idx);
+
+        let mut full_args = Vec::with_capacity(args.len() + 1);
+        full_args.push(receiver);
+        full_args.extend(args);
+
+        let result = match method {
+            Value::Closure(ref c) => call_closure(&mut self.interp, c, full_args)?,
+            _ => return Err(MoofError::runtime("method is not callable")),
+        };
+        self.stack.push(result);
+        Ok(())
+    }
+
+    /// Dispatch a message send without caching (for TailSend, etc.)
     fn dispatch_send(&mut self, selector: u32, argc: usize) -> Result<()> {
         let receiver_idx = self.stack.len() - 1 - argc;
         let receiver = self.stack[receiver_idx].clone();
@@ -373,9 +486,11 @@ pub fn execute_bytecode(
     bp: usize,
 ) -> Result<Value> {
     let mut ip: usize = 0;
-    let code = &func.code;
+    let mut current_func = func.clone();
+    let mut current_bp = bp;
 
     loop {
+        let code = &current_func.code;
         let op_byte = code[ip];
         ip += 1;
 
@@ -393,19 +508,19 @@ pub fn execute_bytecode(
             Op::LoadConst => {
                 let idx = bytecode::read_u16(code, ip) as usize;
                 ip += 2;
-                stack.push(func.constants[idx].clone());
+                stack.push(current_func.constants[idx].clone());
             }
             Op::LoadNil => stack.push(Value::Nil),
             Op::LoadTrue => stack.push(Value::Bool(true)),
             Op::LoadFalse => stack.push(Value::Bool(false)),
             Op::GetLocal => {
                 let slot = code[ip] as usize; ip += 1;
-                stack.push(stack[bp + slot].clone());
+                stack.push(stack[current_bp + slot].clone());
             }
             Op::SetLocal => {
                 let slot = code[ip] as usize; ip += 1;
                 let val = stack.last().cloned().unwrap_or(Value::Nil);
-                stack[bp + slot] = val;
+                stack[current_bp + slot] = val;
             }
             Op::GetGlobal => {
                 let sym = bytecode::read_u16(code, ip) as u32; ip += 2;
@@ -459,12 +574,40 @@ pub fn execute_bytecode(
                 let target = bytecode::read_u16(code, ip) as usize; ip += 2;
                 if stack.last().map(|v| v.is_truthy()).unwrap_or(false) { ip = target; }
             }
-            Op::Call | Op::TailCall => {
+            Op::Call => {
                 let argc = code[ip] as usize; ip += 1;
                 let callee_idx = stack.len() - 1 - argc;
                 let callee = stack[callee_idx].clone();
                 let args: Vec<Value> = stack[callee_idx + 1..].to_vec();
                 stack.truncate(callee_idx);
+                let result = interp.invoke(callee, args)?;
+                stack.push(result);
+            }
+            Op::TailCall => {
+                let argc = code[ip] as usize; ip += 1;
+                let callee_idx = stack.len() - 1 - argc;
+                let callee = stack[callee_idx].clone();
+                let args: Vec<Value> = stack[callee_idx + 1..].to_vec();
+                stack.truncate(callee_idx);
+
+                // TCO: if callee is bytecode, swap function and restart
+                if let Value::Closure(ref c) = callee {
+                    if let ClosureBody::Bytecode(ref new_func) = c.body {
+                        for i in 0..new_func.local_count as usize {
+                            let val = args.get(i).cloned().unwrap_or(Value::Nil);
+                            if current_bp + i < stack.len() {
+                                stack[current_bp + i] = val;
+                            } else {
+                                stack.push(val);
+                            }
+                        }
+                        stack.truncate(current_bp + new_func.local_count as usize);
+                        current_func = new_func.clone();
+                        ip = 0;
+                        continue;
+                    }
+                }
+                // Non-bytecode: regular call
                 let result = interp.invoke(callee, args)?;
                 stack.push(result);
             }
