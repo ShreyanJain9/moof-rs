@@ -223,6 +223,7 @@ pub struct MoofClosure {
 pub enum ClosureBody {
     Expr(Value),
     Native(NativeFn),
+    Bytecode(std::rc::Rc<crate::bytecode::CompiledFunction>),
 }
 
 pub type NativeFn = fn(&mut crate::interpreter::Interpreter, Vec<Value>) -> crate::error::Result<Value>;
@@ -243,6 +244,7 @@ impl fmt::Debug for ClosureBody {
         match self {
             ClosureBody::Expr(_) => write!(f, "Expr(...)"),
             ClosureBody::Native(_) => write!(f, "Native"),
+            ClosureBody::Bytecode(cf) => write!(f, "Bytecode({:?})", cf),
         }
     }
 }
@@ -252,6 +254,7 @@ impl Clone for ClosureBody {
         match self {
             ClosureBody::Expr(v) => ClosureBody::Expr(v.clone()),
             ClosureBody::Native(f) => ClosureBody::Native(*f),
+            ClosureBody::Bytecode(cf) => ClosureBody::Bytecode(cf.clone()),
         }
     }
 }

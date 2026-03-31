@@ -294,6 +294,12 @@ impl Interpreter {
         self.evaluate_program(&exprs)
     }
 
+    /// Parse source into a list of AST expressions (for use by the bytecode compiler).
+    pub fn parse_source(&mut self, source: &str, _filename: &str) -> Result<Vec<Value>> {
+        let tokens = crate::lexer::Lexer::new(source).tokenize()?;
+        crate::parser::Parser::new(tokens, &mut self.symbols).parse_program()
+    }
+
     // ── REPL introspection helpers ──────────────────────────────────
 
     pub fn class_of_name(&self, name: &str) -> Option<Rc<RefCell<MoofClass>>> {
@@ -631,7 +637,7 @@ impl Interpreter {
                 match &callee {
                     Value::Closure(c) => match &c.body {
                         ClosureBody::Native(f) => Ok(Eval::Val(f(self, args)?)),
-                        ClosureBody::Expr(_) => Ok(Eval::TailCall { func: callee.clone(), args }),
+                        ClosureBody::Expr(_) | ClosureBody::Bytecode(_) => Ok(Eval::TailCall { func: callee.clone(), args }),
                     },
                     // For non-closures (e.g. class constructors), invoke normally
                     _ => Ok(Eval::Val(self.invoke(callee, args)?)),
@@ -813,7 +819,7 @@ impl Interpreter {
     }
 
     /// Expand a macro but return the expanded AST without evaluating it.
-    fn expand_macro_to_ast(
+    pub fn expand_macro_to_ast(
         &mut self,
         macro_closure: &Value,
         args: &Value,
@@ -840,6 +846,7 @@ impl Interpreter {
         match &closure.body {
             ClosureBody::Expr(body) => self.eval(body, &macro_env),
             ClosureBody::Native(f) => f(self, arg_vec),
+            ClosureBody::Bytecode(_) => Err(MoofError::runtime("macros cannot be bytecode-compiled")),
         }
     }
 
@@ -2087,6 +2094,7 @@ impl Interpreter {
         let expanded = match &closure.body {
             ClosureBody::Expr(body) => self.eval(body, &macro_env)?,
             ClosureBody::Native(f) => f(self, arg_vec)?,
+            ClosureBody::Bytecode(_) => return Err(MoofError::runtime("macros cannot be bytecode-compiled")),
         };
 
         // Eval the expanded result in the CALLER's env
@@ -2492,6 +2500,17 @@ pub fn call_closure(
 ) -> Result<Value> {
     match &closure.body {
         ClosureBody::Native(f) => f(interp, args),
+        ClosureBody::Bytecode(func) => {
+            // Execute bytecode closure via a mini-VM execution
+            let bp = 0;
+            let mut stack: Vec<Value> = Vec::with_capacity(64);
+            // Fill locals with args
+            for i in 0..func.local_count as usize {
+                let val = args.get(i).cloned().unwrap_or(Value::Nil);
+                stack.push(val);
+            }
+            crate::vm::execute_bytecode(interp, func, &mut stack, bp)
+        }
         ClosureBody::Expr(body) => {
             let call_env = setup_call_env(interp, closure, &args)?;
             let mut result = interp.eval_tail(body, &call_env)?;
@@ -2505,6 +2524,14 @@ pub fn call_closure(
                             Value::Closure(ref c) => {
                                 match &c.body {
                                     ClosureBody::Native(f) => return f(interp, tc_args),
+                                    ClosureBody::Bytecode(func) => {
+                                        let mut stack: Vec<Value> = Vec::with_capacity(64);
+                                        for i in 0..func.local_count as usize {
+                                            let val = tc_args.get(i).cloned().unwrap_or(Value::Nil);
+                                            stack.push(val);
+                                        }
+                                        return crate::vm::execute_bytecode(interp, func, &mut stack, 0);
+                                    }
                                     ClosureBody::Expr(body) => {
                                         let new_env = setup_call_env(interp, c, &tc_args)?;
                                         result = interp.eval_tail(body, &new_env)?;

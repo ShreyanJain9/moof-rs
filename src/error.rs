@@ -33,6 +33,16 @@ impl MoofError {
         }
     }
 
+    pub fn syntax_simple(msg: impl Into<String>) -> Self {
+        MoofError {
+            kind: ErrorKind::Syntax,
+            message: msg.into(),
+            line: None,
+            column: None,
+            error_object: None,
+        }
+    }
+
     pub fn runtime(msg: impl Into<String>) -> Self {
         MoofError {
             kind: ErrorKind::Runtime,
