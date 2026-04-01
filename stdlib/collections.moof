@@ -14,7 +14,7 @@
   (method length () (__primitive cons_length self))
   (method empty? () false)
   (method nil? () false)
-  (method class () "Cons")
+
   (method to_s () (__primitive obj_to_s self))
 
   (method last ()
@@ -114,7 +114,7 @@
     (define (go lst acc)
       (if (nil? lst) acc
         (let ((item (car lst)))
-          (if (= (type-of item) "List")
+          (if [item is_a: Cons]
             (go (cdr lst) [acc append: [item flatten]])
             (go (cdr lst) [acc push: item])))))
     (go self (list)))
@@ -171,7 +171,7 @@
   (method length () (__primitive table_length self))
   (method empty? () (= [self length] 0))
   (method nil? () false)
-  (method class () "Table")
+
   (method to_s () (__primitive obj_to_s self))
 
   (method keys () (__primitive table_keys self))

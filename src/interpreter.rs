@@ -65,6 +65,11 @@ pub struct Interpreter {
     /// bind __current_class for super sends.
     pub current_method_class: Option<Rc<RefCell<MoofClass>>>,
 
+    // ── Class object registry ──────────────────────────────────────
+    /// Maps class name SymId → the Value::Object representing that class.
+    /// Used by class_object_of() to return class objects instead of strings.
+    pub class_objects: HashMap<SymId, Value>,
+
     // ── Import system ──────────────────────────────────────────────
     /// Path of the file currently being evaluated (for relative require resolution).
     pub current_file: Option<PathBuf>,
@@ -282,6 +287,7 @@ impl Interpreter {
             io_error_class,
             source_locs: HashMap::new(),
             current_method_class: None,
+            class_objects: HashMap::new(),
             current_file: None,
             loaded_modules: HashMap::new(),
             loading_stack: Vec::new(),
@@ -336,7 +342,8 @@ impl Interpreter {
                 class: metaclass,
                 fields: Vec::new(),
             })));
-            self.global_env.define(name_id, class_obj, false);
+            self.global_env.define(name_id, class_obj.clone(), false);
+            self.class_objects.insert(name_id, class_obj);
         }
     }
 
@@ -1634,6 +1641,58 @@ impl Interpreter {
         }
     }
 
+    /// Return the class object (Value::Object) for a given value.
+    /// This is what `.class` should return — a first-class class object.
+    pub fn class_object_of(&self, val: &Value) -> Value {
+        let class_rc = self.class_of(val);
+        let name_id = class_rc.borrow().name;
+        // Look up the class-as-Value in our registry
+        if let Some(class_val) = self.class_objects.get(&name_id) {
+            return class_val.clone();
+        }
+        // Fallback: for Object instances, their class might be a user-defined class
+        // whose name is in the env. Try to find it.
+        if let Ok(val) = self.global_env.get(name_id) {
+            return val;
+        }
+        // Last resort: return a string (shouldn't happen with proper registration)
+        Value::Str(Rc::from(self.symbols.name(name_id)))
+    }
+
+    /// Given a class-as-Value::Object, find the real MoofClass it represents.
+    /// Works for both bootstrap classes (which use class_class as metaclass)
+    /// and user-defined classes (which have <Name> meta metaclasses).
+    pub fn real_class_from_class_object(&self, class_val: &Value) -> Result<Rc<RefCell<MoofClass>>> {
+        // Check class_objects registry by pointer identity
+        if let Value::Object(obj_rc) = class_val {
+            for (&name_id, stored_val) in &self.class_objects {
+                if let Value::Object(stored_rc) = stored_val {
+                    if Rc::ptr_eq(obj_rc, stored_rc) {
+                        // Found it — look up the actual MoofClass
+                        if let Some(class) = self.find_class_by_name(name_id, &self.global_env.clone()) {
+                            return Ok(class);
+                        }
+                    }
+                }
+            }
+            // Fallback: try the old metaclass-based approach for user classes
+            // not yet in the registry
+            let obj = obj_rc.borrow();
+            let metaclass = obj.class.borrow();
+            let meta_name = self.symbols.name(metaclass.name).to_string();
+            let real_name = meta_name.strip_suffix(" meta").unwrap_or(&meta_name);
+            let real_id = self.symbols.lookup_id(real_name).copied();
+            drop(metaclass);
+            drop(obj);
+            if let Some(real_id) = real_id {
+                if let Some(class) = self.find_class_by_name(real_id, &self.global_env.clone()) {
+                    return Ok(class);
+                }
+            }
+        }
+        Err(MoofError::runtime("Expected a class object"))
+    }
+
     /// Dispatch a message to a receiver through the class hierarchy.
     pub fn send_message(
         &mut self,
@@ -1709,24 +1768,29 @@ impl Interpreter {
 
     /// Parse a class definition from cons list args.
     fn eval_class(&mut self, args: &Value, env: &Env) -> Result<Value> {
-        let name_id = nth_car(args, 0)?.as_symbol().map_err(|_| {
-            MoofError::runtime("class: expected symbol name")
-        })?;
+        // Check if named or anonymous class
+        let first = nth_car(args, 0)?;
+        let (name_id, is_anonymous) = if let Ok(sym_id) = first.as_symbol() {
+            // Named class: (class Foo ...)
+            (sym_id, false)
+        } else {
+            // Anonymous class: (class (fields ...) (method ...) ...)
+            let anon_name = format!("<anon-class-{}>", self.class_objects.len());
+            let anon_id = self.symbols.intern(&anon_name);
+            (anon_id, true)
+        };
 
         // Check if reopening an existing class
-        let existing = env.get(name_id).ok().and_then(|val| {
+        let existing = if is_anonymous { None } else { env.get(name_id).ok().and_then(|val| {
             if let Value::Object(ref obj) = val {
-                // The class is stored as an Object whose class is the metaclass.
-                // The metaclass points back to the real class.
-                // We find the "real" MoofClass by looking at the metaclass's methods...
-                // Actually, we store a reference to the real class in the env.
                 Some(obj.clone())
             } else {
                 None
             }
-        });
+        }) };
 
-        let body = nth_cdr(args, 0)?;
+        // For named classes, body is after the name; for anonymous, body IS the args
+        let body = if is_anonymous { args } else { nth_cdr(args, 0)? };
 
         let mut superclass: Option<Rc<RefCell<MoofClass>>> = None;
         let mut field_names: Vec<SymId> = Vec::new();
@@ -1938,14 +2002,16 @@ impl Interpreter {
             fields: Vec::new(),
         };
         let class_val = Value::Object(Rc::new(RefCell::new(class_obj)));
-        env.define(name_id, class_val.clone(), false);
+
+        if !is_anonymous {
+            env.define(name_id, class_val.clone(), false);
+        }
+        self.class_objects.insert(name_id, class_val.clone());
 
         // Also store the real MoofClass rc somewhere we can find it.
         // We use a convention: store it under __class:<name> in the env.
         let class_key_name = format!("__class:{}", self.symbols.name(name_id));
         let class_key_id = self.symbols.intern(&class_key_name);
-        // We can't store Rc<RefCell<MoofClass>> in env directly; wrap as an Object
-        // whose .class IS the class itself (a self-referential trick for lookup).
         let class_holder = MoofObject {
             class: new_class.clone(),
             fields: Vec::new(),

@@ -33,7 +33,7 @@
   (method even? () (= (% self 2) 0))
   (method odd? () (not [self even?]))
   (method nil? () false)
-  (method class () "Integer")
+
 
   ;; Range / comparison
   (method between:and: (lo hi) (and (>= self lo) (<= self hi)))
@@ -102,7 +102,7 @@
   (method infinite? () (__primitive float_infinite self))
   (method finite? () (__primitive float_finite self))
   (method nil? () false)
-  (method class () "Float")
+
 
   ;; Range / comparison
   (method max: (other) (if (> self other) self other))

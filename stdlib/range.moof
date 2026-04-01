@@ -13,7 +13,7 @@
   (method size () (__primitive range_length self))
   (method contains: (val) (__primitive range_contains self val))
   (method to_s () (__primitive obj_to_s self))
-  (method class () "Range")
+
   (method nil? () false)
 
   (method to_list ()

@@ -93,6 +93,42 @@ fn install_class_class_methods(interp: &mut Interpreter) {
         let _ = interp.send_message(instance.clone(), init_sel, init_args);
         Ok(instance)
     });
+
+    // name — return the class name as a string
+    register_method(interp, &class, "name", |interp, args| {
+        let real_class = interp.real_class_from_class_object(&args[0])?;
+        let name = interp.symbols.name(real_class.borrow().name).to_string();
+        Ok(Value::Str(Rc::from(name.as_str())))
+    });
+
+    // to_s — class prints as its name
+    register_method(interp, &class, "to_s", |interp, args| {
+        let real_class = interp.real_class_from_class_object(&args[0])?;
+        let name = interp.symbols.name(real_class.borrow().name).to_string();
+        Ok(Value::Str(Rc::from(name.as_str())))
+    });
+
+    // superclass — return the superclass object (or nil)
+    register_method(interp, &class, "superclass", |interp, args| {
+        let real_class = interp.real_class_from_class_object(&args[0])?;
+        let sup = real_class.borrow().superclass.clone();
+        match sup {
+            Some(super_rc) => {
+                let name_id = super_rc.borrow().name;
+                Ok(interp.class_objects.get(&name_id).cloned().unwrap_or(Value::Nil))
+            }
+            None => Ok(Value::Nil),
+        }
+    });
+
+    // methods — return a list of method selector names
+    register_method(interp, &class, "methods", |interp, args| {
+        let real_class = interp.real_class_from_class_object(&args[0])?;
+        let methods: Vec<Value> = real_class.borrow().methods.keys()
+            .map(|&sel_id| Value::Str(Rc::from(interp.symbols.name(sel_id))))
+            .collect();
+        Ok(Value::from_slice(&methods))
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -297,9 +333,9 @@ fn install_globals(interp: &mut Interpreter) {
     });
 
     // Introspection
-    register(interp, "type-of", |_interp, args| {
+    register(interp, "type-of", |interp, args| {
         check_arity("type-of", 1, &args)?;
-        Ok(Value::Str(Rc::from(args[0].type_name())))
+        Ok(interp.class_object_of(&args[0]))
     });
     register(interp, "range", |_interp, args| {
         let (start, end, step) = match args.len() {
@@ -371,21 +407,27 @@ fn install_object_introspection(interp: &mut Interpreter) {
     let class = interp.object_class.clone();
 
     register_method(interp, &class, "class", |interp, args| {
-        let cls = interp.class_of(&args[0]);
-        let name_id = cls.borrow().name;
-        Ok(Value::Str(Rc::from(interp.symbols.name(name_id))))
+        Ok(interp.class_object_of(&args[0]))
     });
 
     register_method(interp, &class, "is_a:", |interp, args| {
-        let target_name = match &args[1] {
-            Value::Str(s) => s.to_string(),
-            Value::Symbol(id) => interp.symbols.name(*id).to_string(),
-            _ => return Err(MoofError::type_error("is_a: expects a class name")),
+        // Accept class objects, strings, or symbols
+        let target_name_id = match &args[1] {
+            Value::Object(_) => {
+                // It's a class object — use real_class_from_class_object
+                match interp.real_class_from_class_object(&args[1]) {
+                    Ok(real_class) => real_class.borrow().name,
+                    Err(_) => return Ok(Value::Bool(false)),
+                }
+            }
+            Value::Str(s) => interp.symbols.intern(s),
+            Value::Symbol(id) => *id,
+            _ => return Err(MoofError::type_error("is_a: expects a class or class name")),
         };
+        // Walk superclass chain comparing SymIds
         let mut current = interp.class_of(&args[0]);
         loop {
-            let name_id = current.borrow().name;
-            if interp.symbols.name(name_id) == target_name {
+            if current.borrow().name == target_name_id {
                 return Ok(Value::Bool(true));
             }
             let sup = current.borrow().superclass.clone();

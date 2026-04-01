@@ -11,7 +11,7 @@
   (method not () false)
   (method to_s () "true")
   (method nil? () false)
-  (method class () "Bool")
+
   (method and: (other) other)
   (method or: (other) self)
   (method ifTrue: (block) [block value])
@@ -26,7 +26,7 @@
   (method not () true)
   (method to_s () "false")
   (method nil? () false)
-  (method class () "Bool")
+
   (method and: (other) self)
   (method or: (other) other)
   (method ifTrue: (block) nil)
@@ -44,7 +44,7 @@
   (method empty? () true)
   (method length () 0)
   (method to_s () "nil")
-  (method class () "Nil")
+
   (method ifNil: (block) [block value])
   (method ifNotNil: (block) nil)
   (method ifTrue: (block) nil)

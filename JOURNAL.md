@@ -647,6 +647,42 @@ All 21 unit tests pass. All 6 example files produce identical output. New featur
 (add5 10)                          ;; => 15
 ```
 
+### Classes as First-Class Objects (Session 6 continued)
+
+Classes were identified by strings everywhere — `[3 class]` returned `"Integer"`, `is_a:` took string arguments, type predicates compared strings. This was reworked so classes are proper first-class objects.
+
+**class_objects registry** — `HashMap<SymId, Value>` on Interpreter maps class name → the `Value::Object` representing that class. Both `register_bootstrap_classes()` and `eval_class()` populate it. New `class_object_of(val)` method returns the class object for any value.
+
+**`.class` returns the class object** — `[3 class]` now returns the Integer class object (not `"Integer"`). Class objects have `name`, `to_s`, `superclass`, and `methods` methods via `class_class`. `real_class_from_class_object()` resolves class objects back to `Rc<RefCell<MoofClass>>` by pointer identity in the registry, avoiding the fragile " meta" suffix stripping.
+
+**`is_a:` accepts class objects** — `[3 is_a: Integer]`, `[3 is_a: Numeric]`, `[3 is_a: Object]` all work. Still accepts strings for backwards compatibility.
+
+**`type-of` returns class objects** — `(= (type-of 3) Integer)` → `true`.
+
+**Type predicates rewritten** — `(integer? x)` is now `[x is_a: Integer]` instead of string comparison.
+
+**Anonymous classes** — `(class (fields x y) (method ...))` without a name returns the class object directly. Gets an auto-generated internal name like `<anon-class-22>`.
+
+```moof
+;; Classes are objects
+(= [3 class] Integer)           ;; => true
+[[3 class] name]                ;; => "Integer"
+[Integer superclass]            ;; => Numeric (the class object)
+(= [Integer superclass] Numeric) ;; => true
+[3 is_a: Integer]               ;; => true
+[3 is_a: Numeric]               ;; => true
+
+;; Pass classes as values
+(define MyClass Integer)
+[3 is_a: MyClass]               ;; => true
+
+;; Anonymous classes
+(define Point (class (fields x y)
+  (method to_s () (format "Point(~a, ~a)" x y))))
+(define p (Point 3 4))
+[p to_s]                        ;; => "Point(3, 4)"
+```
+
 ---
 
 ## Final state

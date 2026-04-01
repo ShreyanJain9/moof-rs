@@ -8,7 +8,7 @@
 (class Closure
   (method arity () (__primitive closure_arity self))
   (method nil? () false)
-  (method class () "Closure")
+
   (method to_s () (__primitive obj_to_s self))
 
   ;; whileTrue: — Smalltalk-style loop

@@ -24,15 +24,15 @@
 
 ;; ── Type Checks ───────────────────────────────────────────────────
 
-(define (number?   x) (let ((t (type-of x))) (if (= t "Integer") true (= t "Float"))))
-(define (integer?  x) (= (type-of x) "Integer"))
-(define (float?    x) (= (type-of x) "Float"))
-(define (string?   x) (= (type-of x) "String"))
-(define (list?     x) (= (type-of x) "List"))
-(define (nil?      x) (= (type-of x) "Nil"))
-(define (bool?     x) (= (type-of x) "Bool"))
-(define (function? x) (= (type-of x) "Function"))
-(define (symbol?   x) (= (type-of x) "Symbol"))
+(define (number?   x) [x is_a: Numeric])
+(define (integer?  x) [x is_a: Integer])
+(define (float?    x) [x is_a: Float])
+(define (string?   x) [x is_a: String])
+(define (list?     x) [x is_a: Cons])
+(define (nil?      x) [x is_a: NilClass])
+(define (bool?     x) (or [x is_a: TrueClass] [x is_a: FalseClass]))
+(define (function? x) [x is_a: Closure])
+(define (symbol?   x) [x is_a: Symbol])
 
 ;; ── Dynamic Message Send ──────────────────────────────────────────
 

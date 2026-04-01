@@ -19,7 +19,7 @@
   (method to_sym () (__primitive str_to_sym self))
 
   (method nil? () false)
-  (method class () "String")
+
   (method empty? () (= [self length] 0))
 
   (method at: (idx) (__primitive str_at self idx))

@@ -65,6 +65,7 @@ There is no normalizer or separate AST enum. The parser produces cons lists (Val
 - **Callable protocol**: Any object responding to `call:` can be called with `(obj args...)`. The evaluator's `invoke()` falls through to `try_callable_protocol()` for non-closure values.
 - **External stdlib**: Loaded from disk via `load_prelude()` with path resolution, caching, and circular dependency detection. Boot order: core → bool → numeric → string → collections → closure → range → error → symbol → functional → math → adt → macros.
 - **Multi-keyword selectors in class defs**: `parse_method_selector()` merges consecutive colon-terminated symbols (e.g., `replace_all: with:` → `replace_all:with:`).
+- **Classes are objects**: `[3 class]` returns the Integer class object (not a string). `is_a:` accepts class objects. `class_objects: HashMap<SymId, Value>` maps names to class-as-Value. Anonymous classes: `(class (fields ...) ...)` without a name. Class introspection: `.name`, `.superclass`, `.methods` on class objects.
 
 ## Class Hierarchy
 
