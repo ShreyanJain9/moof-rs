@@ -28,7 +28,9 @@ There is no normalizer or separate AST enum. The parser produces cons lists (Val
 
 3. **Interpreter** (`interpreter.rs`) -- classic Lisp eval on cons lists. Special forms are recognized by interned symbol comparison against `KnownSymbols`. Smalltalk-style metaclass bootstrap: every class has a metaclass, Object is the root, Class's metaclass is itself. TCO via `Eval` enum trampoline (`Eval::Val` | `Eval::TailCall`). Owns registries for classes, protocols, macros, modules, types.
 
-4. **Builtins** (`builtins.rs`) -- all built-in functions AND type methods. Global functions (`+`, `-`, `print`, `cons`, etc.) and per-class methods (`abs`, `length`, `map:`, etc.) are all registered as unified `Closure` values with `ClosureBody::Native`. One file, one registration pattern.
+4. **Builtins** (`builtins.rs`) -- minimal set of Rust-native functions that need interpreter access. Variadic globals (`+`, `-`, `cons`, `print`, `apply`, etc.), Class `new`, Object introspection (`class`, `is_a:`, `responds_to:`, `send:`), Closure invoke (`value`, `value:`, `call:`, `curry:`), and Error field access. Most type methods are now defined in the stdlib .moof files.
+
+4b. **Primitives** (`primitives.rs`) -- ~50 raw operations exposed via `__primitive` special form. Polymorphic numeric ops, string ops, cons/table ops, I/O, type introspection. Called from Moof as `(__primitive num_add self other)`. Shared numeric helpers with builtins.
 
 5. **Symbol** (`symbol.rs`) -- symbol interning. `SymId = u32`. `SymbolTable` maps strings to IDs and back. `KnownSymbols` pre-interns all special form names, internal desugaring names, and common identifiers for O(1) comparison.
 
@@ -42,7 +44,7 @@ There is no normalizer or separate AST enum. The parser produces cons lists (Val
 
 10. **Error** (`error.rs`) -- `MoofError` with `ErrorKind` (Syntax, Runtime, Name, Message, Arity, Type, IO), message, optional line/column, and optional `error_object: Option<Value>` for the Moof-level Error class hierarchy.
 
-11. **Stdlib** (`stdlib/stdlib.moof`) -- self-hosting standard library embedded via `include_str!`. Provides functional-style wrappers (`map`, `filter`, `reduce`), higher-order utilities (`compose`, `pipe`, `partial`), type checks, numeric utilities, ADTs (`Option`, `Result`, `Pair`), protocols, macros (`when`, `unless`), and built-in type extensions.
+11. **Stdlib** (`stdlib/*.moof`) -- external self-hosting standard library loaded from disk via `load_prelude()`. 13 files: `prelude.moof` (boot entry), `core.moof` (Object base), `bool.moof` (TrueClass/FalseClass/NilClass), `numeric.moof` (Integer/Float), `string.moof`, `collections.moof` (Cons/Table), `closure.moof`, `range.moof`, `error.moof`, `symbol.moof`, `functional.moof` (HOFs, type checks), `math.moof`, `adt.moof` (Option/Result/Pair), `macros.moof`. Most type methods use `__primitive` to call into Rust. Found via `MOOF_STDLIB` env var, CWD, or binary-relative path.
 
 12. **REPL** (`repl.rs`) -- rustyline-based with tab completion, meta-commands (`,help`, `,env`, `,type`, `,doc`, `,methods`, `,classes`, `,load`, `,time`, `,clear`, `,reset`, `,version`, `,quit`), multi-line input, `_` for last result, startup tips.
 
@@ -58,7 +60,11 @@ There is no normalizer or separate AST enum. The parser produces cons lists (Val
 - **TCO**: `Eval` enum with `TailCall { func, args }`, trampoline loop in `call_closure`. Tail-position variants exist for `if`, `do`, `let`, `match`, `cond`, `and`, `or`, `try`.
 - **Error objects**: Moof has an Error class hierarchy (Error > RuntimeError > NameError/TypeError/...). `MoofError` wraps an optional `Value` error object for catch blocks.
 - **Environment threading**: `eval(&mut self, expr, env)` takes env as parameter. No `self.env` save/restore. Closures capture `env.clone()`.
-- **Open classes**: Any class can be reopened at runtime via `(class Name ...)`. Built-in types are proper classes and can be extended with new methods.
+- **Open classes**: Any class can be reopened at runtime via `(class Name ...)`. Built-in types are proper classes and can be extended with new methods. Bootstrap classes are registered in global env for reopening.
+- **Primitive FFI**: `__primitive` special form dispatches to `primitive_registry: HashMap<SymId, NativeFn>`. ~50 raw operations. Moof stdlib wraps these into the full method protocol.
+- **Callable protocol**: Any object responding to `call:` can be called with `(obj args...)`. The evaluator's `invoke()` falls through to `try_callable_protocol()` for non-closure values.
+- **External stdlib**: Loaded from disk via `load_prelude()` with path resolution, caching, and circular dependency detection. Boot order: core → bool → numeric → string → collections → closure → range → error → symbol → functional → math → adt → macros.
+- **Multi-keyword selectors in class defs**: `parse_method_selector()` merges consecutive colon-terminated symbols (e.g., `replace_all: with:` → `replace_all:with:`).
 
 ## Class Hierarchy
 

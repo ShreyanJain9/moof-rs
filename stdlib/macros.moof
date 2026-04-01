@@ -1,0 +1,13 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Macros — syntactic sugar
+;; ═══════════════════════════════════════════════════════════════════════
+
+(defmacro unless (cond body) `(if (not ,cond) ,body nil))
+(defmacro when (cond body) `(if ,cond ,body nil))
+
+;; ── Protocols ────────────────────────────────────────────────────────
+
+(protocol Countable  length)
+(protocol Iterable   map: filter: each:)
+(protocol Comparable >)
+(protocol Showable   to_s)

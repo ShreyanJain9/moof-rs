@@ -1,0 +1,33 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Math — constants and numeric utilities
+;; ═══════════════════════════════════════════════════════════════════════
+
+(define pi 3.141592653589793)
+(define e  2.718281828459045)
+
+(define (square x) (* x x))
+(define (cube x)   (* x x x))
+(define (abs x)    (if (< x 0) (- x) x))
+(define (max a b)  (if (> a b) a b))
+(define (min a b)  (if (< a b) a b))
+(define (even? n)  (= (% n 2) 0))
+(define (odd? n)   (not (even? n)))
+(define (between? n lo hi) (if (>= n lo) (<= n hi) false))
+(define (clamp n lo hi) (max lo (min hi n)))
+(define (gcd a b) (if (= b 0) a (gcd b (% a b))))
+(define (lcm a b) (/ (* a b) (gcd a b)))
+
+(define (factorial n)
+  (if (<= n 1) 1 (* n (factorial (- n 1)))))
+
+(define (power base exp)
+  (if (= exp 0) 1
+    (if (even? exp)
+      (let ((half (power base (/ exp 2)))) (* half half))
+      (* base (power base (- exp 1))))))
+
+(define (sum lst)     (reduce + 0 lst))
+(define (product lst) (reduce * 1 lst))
+
+(define (degrees->radians d) (* d (/ pi 180)))
+(define (radians->degrees r) (* r (/ 180 pi)))

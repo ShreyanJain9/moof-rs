@@ -9,6 +9,7 @@ pub mod lexer;
 pub mod parser;
 pub mod interpreter;
 pub mod builtins;
+pub mod primitives;
 pub mod bytecode;
 pub mod compiler;
 pub mod vm;

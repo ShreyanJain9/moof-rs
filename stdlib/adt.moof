@@ -1,0 +1,33 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; ADTs — Option, Result, Pair
+;; ═══════════════════════════════════════════════════════════════════════
+
+(type Option (Some value) None)
+(type Result (Ok value) (Err reason))
+(type Pair   (Pair fst snd))
+
+;; ── Option Helpers ────────────────────────────────────────────────
+
+(define (some? x) (match x ((Some _) true) (_ false)))
+(define (unwrap opt default) (match opt ((Some v) v) (_ default)))
+(define (option-map f opt) (match opt ((Some v) (Some (f v))) (_ None)))
+(define (option-flat-map f opt) (match opt ((Some v) (f v)) (_ None)))
+(define (option-filter pred opt)
+  (match opt ((Some v) (if (pred v) opt None)) (_ None)))
+
+;; ── Result Helpers ────────────────────────────────────────────────
+
+(define (ok? x)  (match x ((Ok _) true) (_ false)))
+(define (err? x) (match x ((Err _) true) (_ false)))
+(define (unwrap-ok res default) (match res ((Ok v) v) (_ default)))
+(define (unwrap-err res default) (match res ((Err e) e) (_ default)))
+(define (result-map f res) (match res ((Ok v) (Ok (f v))) ((Err e) (Err e))))
+(define (result-flat-map f res) (match res ((Ok v) (f v)) ((Err e) (Err e))))
+(define (try-call f . args) (try (Ok (apply f args)) (catch e (Err e))))
+
+;; ── Pair Helpers ──────────────────────────────────────────────────
+
+(define (fst p) (match p ((Pair a _) a)))
+(define (snd p) (match p ((Pair _ b) b)))
+(define (map-fst f p) (match p ((Pair a b) (Pair (f a) b))))
+(define (map-snd f p) (match p ((Pair a b) (Pair a (f b)))))

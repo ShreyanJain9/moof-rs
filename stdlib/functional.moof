@@ -1,0 +1,157 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Functional — wrappers, HOF, type checks, utilities
+;; ═══════════════════════════════════════════════════════════════════════
+
+;; ── Functional-Style Wrappers ──────────────────────────────────────
+
+(define (length x)    [x length])
+(define (reverse lst) [lst reverse])
+(define (sort lst)    [lst sort])
+(define (flatten lst) [lst flatten])
+(define (empty? x)    [x empty?])
+(define (first lst)   [lst first])
+(define (last lst)    [lst last])
+
+(define (map f lst)       [lst map: f])
+(define (filter pred lst) [lst filter: pred])
+(define (reduce f init lst) [lst reduce: f init: init])
+(define (for-each f lst)  [lst each: f])
+
+(define (take n lst)   [lst take: n])
+(define (drop n lst)   [lst drop: n])
+(define (zip a b)      [a zip: b])
+(define (nth i lst)    [lst at: i])
+
+;; ── Type Checks ───────────────────────────────────────────────────
+
+(define (number?   x) (let ((t (type-of x))) (if (= t "Integer") true (= t "Float"))))
+(define (integer?  x) (= (type-of x) "Integer"))
+(define (float?    x) (= (type-of x) "Float"))
+(define (string?   x) (= (type-of x) "String"))
+(define (list?     x) (= (type-of x) "List"))
+(define (nil?      x) (= (type-of x) "Nil"))
+(define (bool?     x) (= (type-of x) "Bool"))
+(define (function? x) (= (type-of x) "Function"))
+(define (symbol?   x) (= (type-of x) "Symbol"))
+
+;; ── Dynamic Message Send ──────────────────────────────────────────
+
+(define (send receiver selector . args)
+  (apply __send (cons receiver (cons selector args))))
+
+(define (to-string x) [x to_s])
+
+;; ── Assertion ─────────────────────────────────────────────────────
+
+(define (assert condition)
+  (if condition true (error "Assertion failed")))
+
+(define (assert-equal expected actual)
+  (if (= expected actual)
+    true
+    (error (format "Assertion failed: expected ~a, got ~a" expected actual))))
+
+;; ── Identity and Composition ──────────────────────────────────────
+
+(define (identity x) x)
+(define (compose f g) (lambda (x) (f (g x))))
+(define (flip f) (lambda (a b) (f b a)))
+(define (constantly x) (lambda (. args) x))
+(define (complement pred) (lambda (x) (not (pred x))))
+
+(define (pipe . fns)
+  (lambda (x) (reduce { |acc f| (f acc) } x fns)))
+
+(define (juxt . fns)
+  (lambda (x) (map { |f| (f x) } fns)))
+
+(define (partial f . bound)
+  (lambda (. args) (apply f (append bound args))))
+
+;; ── List Utilities ────────────────────────────────────────────────
+
+(define (second lst) [lst at: 1])
+(define (third  lst) [lst at: 2])
+
+(define (any? pred lst)  [lst any: pred])
+(define (all? pred lst)  [lst all: pred])
+(define (none? pred lst) [lst none: pred])
+
+(define (find pred lst)
+  (if (empty? lst) nil
+    (if (pred (car lst)) (car lst)
+      (find pred (cdr lst)))))
+
+(define (append . lists)
+  (reduce { |acc lst|
+    (reduce { |a x| (cons x a) } acc (reverse lst))
+  } (list) (reverse lists)))
+
+(define (zip-with f lst1 lst2)
+  (if (if (empty? lst1) true (empty? lst2))
+    (list)
+    (cons (f (car lst1) (car lst2))
+          (zip-with f (cdr lst1) (cdr lst2)))))
+
+(define (repeat x n)
+  (if (<= n 0) (list) (cons x (repeat x (- n 1)))))
+
+(define (partition pred lst)
+  (list (filter pred lst) (filter (complement pred) lst)))
+
+(define (frequencies lst)
+  (reduce
+    { |counts x|
+      (let ((n ([counts at: x])))
+        [counts put: x value: (if (nil? n) 1 (+ n 1))])}
+    {}
+    lst))
+
+(define (sort-by key lst)   [lst sort_by: key])
+(define (sum-by key lst)    (reduce + 0 (map key lst)))
+(define (max-by key lst)
+  (reduce { |best x| (if (> (key x) (key best)) x best) } (car lst) (cdr lst)))
+(define (min-by key lst)
+  (reduce { |best x| (if (< (key x) (key best)) x best) } (car lst) (cdr lst)))
+
+(define (chunk-by n lst)
+  (if (if (empty? lst) true (<= n 0))
+    (list)
+    (cons (take n lst) (chunk-by n (drop n lst)))))
+
+(define (iterate f x n)
+  (if (<= n 0) (list) (cons x (iterate f (f x) (- n 1)))))
+
+(define (index-of pred lst)
+  (define (go lst i)
+    (if (empty? lst) -1
+      (if (pred (car lst)) i
+        (go (cdr lst) (+ i 1)))))
+  (go lst 0))
+
+(define (flat-map f lst) (flatten (map f lst)))
+
+;; ── String Utilities ──────────────────────────────────────────────
+
+(define (string-empty? s) (= [s length] 0))
+(define (string-join sep lst) (if (empty? lst) "" [lst join: sep]))
+(define (words s) (filter (complement string-empty?) [[s trim] split: " "]))
+(define (lines s) [s split: "\n"])
+
+(define (string-concat . strs)
+  (reduce { |acc s| [acc concat: (to-string s)] } "" strs))
+
+(define (string-repeat s n)
+  (if (<= n 0) "" (string-concat s (string-repeat s (- n 1)))))
+
+;; ── Memoize ───────────────────────────────────────────────────────
+
+(define (memoize f)
+  (let ((cache {}))
+    (lambda (x)
+      (let ((cached ([cache at: x])))
+        (if (not (nil? cached))
+          cached
+          (let ((result (f x)))
+            (set! cache [cache put: x value: result])
+            result))))))

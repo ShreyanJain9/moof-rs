@@ -1,0 +1,25 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Closure — block/function methods
+;;
+;; value, value:, value:value:, call:, curry: stay in Rust (builtins.rs)
+;; because they need interp.invoke(). Everything else is defined here.
+;; ═══════════════════════════════════════════════════════════════════════
+
+(class Closure
+  (method arity () (__primitive closure_arity self))
+  (method nil? () false)
+  (method class () "Closure")
+  (method to_s () (__primitive obj_to_s self))
+
+  ;; whileTrue: — Smalltalk-style loop
+  ;; self is the condition block, body is the action block
+  (method whileTrue: (body)
+    (if [self value]
+      (do [body value] [self whileTrue: body])
+      nil))
+
+  ;; whileFalse: — loop while condition is false
+  (method whileFalse: (body)
+    (if (not [self value])
+      (do [body value] [self whileFalse: body])
+      nil)))

@@ -1,0 +1,58 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; String — methods via __primitive
+;; ═══════════════════════════════════════════════════════════════════════
+
+(class String
+  (method length () (__primitive str_length self))
+  (method uppercase () (__primitive str_upper self))
+  (method lowercase () (__primitive str_lower self))
+  (method reverse () (__primitive str_reverse self))
+  (method trim () (__primitive str_trim self))
+  (method strip () (__primitive str_trim self))
+  (method capitalize () (__primitive str_capitalize self))
+  (method chars () (__primitive str_chars self))
+  (method bytes () (__primitive str_bytes self))
+
+  (method to_s () self)
+  (method to_i () (__primitive str_to_int self))
+  (method to_f () (__primitive str_to_float self))
+  (method to_sym () (__primitive str_to_sym self))
+
+  (method nil? () false)
+  (method class () "String")
+  (method empty? () (= [self length] 0))
+
+  (method at: (idx) (__primitive str_at self idx))
+  (method contains: (sub) (__primitive str_contains self sub))
+  (method starts_with: (prefix) (__primitive str_starts_with self prefix))
+  (method ends_with: (suffix) (__primitive str_ends_with self suffix))
+  (method index_of: (sub) (__primitive str_index_of self sub))
+
+  (method split: (delim) (__primitive str_split self delim))
+  (method concat: (other) (__primitive str_concat self (__primitive obj_to_s other)))
+  (method replace_all:with: (from to) (__primitive str_replace self from to))
+  (method slice:length: (start len) (__primitive str_slice self start len))
+  (method * (n) (__primitive str_repeat self n))
+
+  (method includes: (s) [self contains: s])
+  (method first: (n) [self slice: 0 length: n])
+  (method last: (n) [self slice: (- [self length] n) length: n])
+
+  (method each_char: (f)
+    (let ((chars [self chars]))
+      (define (go lst)
+        (if (nil? lst) nil
+          (do (f (car lst)) (go (cdr lst)))))
+      (go chars)))
+
+  (method each_line: (f)
+    (let ((lines [self split: "\n"]))
+      (define (go lst)
+        (if (nil? lst) nil
+          (do (f (car lst)) (go (cdr lst)))))
+      (go lines)))
+
+  (method words () (filter { |w| (not [w empty?]) } [[self trim] split: " "]))
+  (method lines () [self split: "\n"])
+  (method repeat: (n) (__primitive str_repeat self n))
+  (method blank? () [self empty?]))

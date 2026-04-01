@@ -1,0 +1,18 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Core — base methods on Object (inherited by all types)
+;; ═══════════════════════════════════════════════════════════════════════
+
+;; Object methods that DON'T need interpreter introspection are defined here.
+;; Methods like class, is_a:, responds_to:, send: stay in Rust (builtins.rs)
+;; because they need interpreter access.
+
+(class Object
+  (method to_s () (__primitive obj_to_s self))
+  (method inspect () (__primitive obj_to_s self))
+  (method nil? () false)
+  (method == (other) (= self other))
+  (method != (other) (not (= self other)))
+  (method hash () (__primitive obj_hash self))
+  (method initialize () nil)
+  (method ifNil: (block) nil)
+  (method ifNotNil: (block) [block value: self]))

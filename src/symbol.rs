@@ -95,6 +95,7 @@ pub struct KnownSymbols {
     pub super_: SymId,
     pub __current_class: SymId,
     pub classmethod: SymId,
+    pub __primitive: SymId,
 }
 
 impl KnownSymbols {
@@ -155,6 +156,7 @@ impl KnownSymbols {
             super_: syms.intern("super"),
             __current_class: syms.intern("__current_class"),
             classmethod: syms.intern("classmethod"),
+            __primitive: syms.intern("__primitive"),
         }
     }
 }

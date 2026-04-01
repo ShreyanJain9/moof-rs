@@ -1,0 +1,110 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Numeric — Integer and Float methods via __primitive
+;; ═══════════════════════════════════════════════════════════════════════
+
+(class Integer
+  ;; Arithmetic (binary, via primitives)
+  (method + (other) (__primitive num_add self other))
+  (method - (other) (__primitive num_sub self other))
+  (method * (other) (__primitive num_mul self other))
+  (method / (other) (__primitive num_div self other))
+  (method % (other) (__primitive num_mod self other))
+  (method ** (other) (__primitive num_pow self other))
+
+  ;; Comparison
+  (method > (other) (__primitive num_gt self other))
+  (method < (other) (__primitive num_lt self other))
+  (method >= (other) (__primitive num_gte self other))
+  (method <= (other) (__primitive num_lte self other))
+
+  ;; Unary
+  (method abs () (__primitive num_abs self))
+  (method sqrt () (__primitive num_sqrt self))
+
+  ;; Conversion
+  (method to_f () (__primitive int_to_float self))
+  (method to_i () self)
+  (method to_s () (__primitive obj_to_s self))
+
+  ;; Predicates
+  (method zero? () (= self 0))
+  (method positive? () (> self 0))
+  (method negative? () (< self 0))
+  (method even? () (= (% self 2) 0))
+  (method odd? () (not [self even?]))
+  (method nil? () false)
+  (method class () "Integer")
+
+  ;; Range / comparison
+  (method between:and: (lo hi) (and (>= self lo) (<= self hi)))
+  (method max: (other) (if (> self other) self other))
+  (method min: (other) (if (< self other) self other))
+  (method pow: (exp) (__primitive num_pow self exp))
+
+  ;; Iteration
+  (method times: (f)
+    (define (go i)
+      (if (< i self) (do (f i) (go (+ i 1))) nil))
+    (go 0))
+  (method upto: (n)
+    (if (> self n) (list) (cons self [(+ self 1) upto: n])))
+  (method downto: (n)
+    (if (< self n) (list) (cons self [(- self 1) downto: n])))
+
+  ;; Bitwise
+  (method bit_and: (other) (__primitive int_bit_and self other))
+  (method bit_or: (other) (__primitive int_bit_or self other))
+  (method bit_xor: (other) (__primitive int_bit_xor self other))
+
+  ;; Math
+  (method gcd: (other) (__primitive int_gcd self other))
+  (method lcm: (other) (/ (* self other) [self gcd: other])))
+
+;; ── Float ────────────────────────────────────────────────────────────
+
+(class Float
+  ;; Arithmetic
+  (method + (other) (__primitive num_add self other))
+  (method - (other) (__primitive num_sub self other))
+  (method * (other) (__primitive num_mul self other))
+  (method / (other) (__primitive num_div self other))
+  (method ** (other) (__primitive num_pow self other))
+
+  ;; Comparison
+  (method > (other) (__primitive num_gt self other))
+  (method < (other) (__primitive num_lt self other))
+  (method >= (other) (__primitive num_gte self other))
+  (method <= (other) (__primitive num_lte self other))
+
+  ;; Unary
+  (method abs () (__primitive num_abs self))
+  (method sqrt () (__primitive num_sqrt self))
+
+  ;; Conversion
+  (method to_f () self)
+  (method to_i () (__primitive float_to_int self))
+  (method to_s () (__primitive obj_to_s self))
+
+  ;; Rounding
+  (method round () (__primitive float_round self))
+  (method floor () (__primitive float_floor self))
+  (method ceil () (__primitive float_ceil self))
+  (method truncate () (__primitive float_truncate self))
+  (method round: (places)
+    (let ((factor (__primitive num_pow 10.0 places)))
+      (/ (__primitive float_round (* self factor)) factor)))
+
+  ;; Predicates
+  (method zero? () (= self 0.0))
+  (method positive? () (> self 0.0))
+  (method negative? () (< self 0.0))
+  (method nan? () (__primitive float_nan self))
+  (method infinite? () (__primitive float_infinite self))
+  (method finite? () (__primitive float_finite self))
+  (method nil? () false)
+  (method class () "Float")
+
+  ;; Range / comparison
+  (method max: (other) (if (> self other) self other))
+  (method min: (other) (if (< self other) self other))
+  (method pow: (exp) (__primitive num_pow self exp)))

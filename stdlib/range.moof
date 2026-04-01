@@ -1,0 +1,74 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Range — iteration and query via __primitive
+;; ═══════════════════════════════════════════════════════════════════════
+
+(class Range
+  (method first () (__primitive range_start self))
+  (method last ()
+    (let ((len (__primitive range_length self)))
+      (if (= len 0) nil
+        (+ (__primitive range_start self)
+           (* (__primitive range_step self) (- len 1))))))
+  (method length () (__primitive range_length self))
+  (method size () (__primitive range_length self))
+  (method contains: (val) (__primitive range_contains self val))
+  (method to_s () (__primitive obj_to_s self))
+  (method class () "Range")
+  (method nil? () false)
+
+  (method to_list ()
+    (define (go i end step acc)
+      (if (if (> step 0) (>= i end) (<= i end))
+        [acc reverse]
+        (go (+ i step) end step (cons (if (= step 0) i i) acc))))
+    (let ((start (__primitive range_start self))
+          (end (__primitive range_end self))
+          (step (__primitive range_step self)))
+      ;; Handle the simple case properly
+      (define (build i)
+        (if (if (> step 0) (>= i end) (<= i end))
+          (list)
+          (cons i (build (+ i step)))))
+      (build start)))
+
+  (method each: (f)
+    (let ((start (__primitive range_start self))
+          (end (__primitive range_end self))
+          (step (__primitive range_step self)))
+      (define (go i)
+        (if (if (> step 0) (< i end) (> i end))
+          (do (f i) (go (+ i step)))
+          nil))
+      (go start)))
+
+  (method map: (f)
+    (let ((start (__primitive range_start self))
+          (end (__primitive range_end self))
+          (step (__primitive range_step self)))
+      (define (go i)
+        (if (if (> step 0) (< i end) (> i end))
+          (cons (f i) (go (+ i step)))
+          (list)))
+      (go start)))
+
+  (method filter: (f)
+    (let ((start (__primitive range_start self))
+          (end (__primitive range_end self))
+          (step (__primitive range_step self)))
+      (define (go i)
+        (if (if (> step 0) (< i end) (> i end))
+          (let ((v i))
+            (if (f v)
+              (cons v (go (+ i step)))
+              (go (+ i step))))
+          (list)))
+      (go start)))
+
+  (method reverse ()
+    (let ((len (__primitive range_length self)))
+      (if (= len 0) self
+        (let ((start (__primitive range_start self))
+              (step (__primitive range_step self))
+              (last_val (+ start (* step (- len 1))))
+              (new_end (- start step)))
+          (range last_val new_end (- step)))))))

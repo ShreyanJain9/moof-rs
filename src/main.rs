@@ -1,7 +1,6 @@
 use moof::interpreter::Interpreter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const STDLIB: &str = include_str!("../stdlib/stdlib.moof");
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -157,12 +156,10 @@ fn print_error(source: &str, e: &moof::error::MoofError) {
 }
 
 fn load_stdlib(interp: &mut Interpreter) {
-    if !STDLIB.trim().is_empty() {
-        if let Err(e) = interp.load_source(STDLIB, "<stdlib>") {
-            eprintln!(
-                "\x1b[33mWarning: failed to load stdlib: {}\x1b[0m",
-                e.message
-            );
-        }
+    if let Err(e) = interp.load_prelude() {
+        eprintln!(
+            "\x1b[33mWarning: failed to load stdlib: {}\x1b[0m",
+            e.message
+        );
     }
 }

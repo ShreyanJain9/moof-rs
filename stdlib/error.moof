@@ -1,0 +1,7 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Error — error class methods
+;; message, to_s, inspect stay in Rust because they need object field access
+;; ═══════════════════════════════════════════════════════════════════════
+
+;; Error methods that need field access stay in builtins.rs.
+;; This file is a placeholder for future Moof-level error extensions.

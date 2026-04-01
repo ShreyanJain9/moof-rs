@@ -18,8 +18,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HISTORY_FILE: &str = ".moof_history";
 const MAX_HISTORY: usize = 1000;
 
-const STDLIB: &str = include_str!("../stdlib/stdlib.moof");
-
 const TIPS: &[&str] = &[
     "Try [\"hello\" uppercase] to send a message to a string",
     "Use ,help for a list of REPL commands",
@@ -1013,13 +1011,11 @@ fn dirs_or_home() -> std::path::PathBuf {
 }
 
 fn load_stdlib(interp: &mut Interpreter) {
-    if !STDLIB.trim().is_empty() {
-        if let Err(e) = interp.load_source(STDLIB, "<stdlib>") {
-            eprintln!(
-                "\x1b[33mWarning: failed to load stdlib: {}\x1b[0m",
-                e.message
-            );
-        }
+    if let Err(e) = interp.load_prelude() {
+        eprintln!(
+            "\x1b[33mWarning: failed to load stdlib: {}\x1b[0m",
+            e.message
+        );
     }
 }
 

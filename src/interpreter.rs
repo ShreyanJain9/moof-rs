@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::cons;
@@ -7,7 +8,7 @@ use crate::environment::Env;
 use crate::error::{MoofError, Result};
 use crate::symbol::{KnownSymbols, SymId, SymbolTable};
 use crate::value::{
-    ClosureBody, MoofClass, MoofClosure, MoofObject, MoofTable, Value,
+    ClosureBody, MoofClass, MoofClosure, MoofObject, MoofTable, NativeFn, Value,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -32,6 +33,7 @@ pub struct Interpreter {
     pub protocol_registry: HashMap<SymId, Vec<SymId>>,
     pub trait_registry: HashMap<SymId, HashMap<SymId, Value>>,
     pub module_registry: HashMap<SymId, HashMap<SymId, Value>>,
+    pub primitive_registry: HashMap<SymId, NativeFn>,
 
     // Bootstrap type classes
     pub object_class: Rc<RefCell<MoofClass>>,
@@ -62,6 +64,16 @@ pub struct Interpreter {
     /// Set by send_message before calling a method, so setup_call_env can
     /// bind __current_class for super sends.
     pub current_method_class: Option<Rc<RefCell<MoofClass>>>,
+
+    // ── Import system ──────────────────────────────────────────────
+    /// Path of the file currently being evaluated (for relative require resolution).
+    pub current_file: Option<PathBuf>,
+    /// Cache of already-loaded files: canonical path -> last result.
+    pub loaded_modules: HashMap<PathBuf, Value>,
+    /// Stack of files currently being loaded (for circular dependency detection).
+    pub loading_stack: Vec<PathBuf>,
+    /// Base directory for stdlib files (set once at startup).
+    pub stdlib_dir: Option<PathBuf>,
 }
 
 impl Interpreter {
@@ -245,6 +257,7 @@ impl Interpreter {
             protocol_registry: HashMap::new(),
             trait_registry: HashMap::new(),
             module_registry: HashMap::new(),
+            primitive_registry: HashMap::new(),
             object_class,
             class_class,
             integer_class,
@@ -269,12 +282,62 @@ impl Interpreter {
             io_error_class,
             source_locs: HashMap::new(),
             current_method_class: None,
+            current_file: None,
+            loaded_modules: HashMap::new(),
+            loading_stack: Vec::new(),
+            stdlib_dir: None,
         };
 
         // Install built-in functions
         crate::builtins::install(&mut interp);
 
+        // Install primitive FFI registry
+        crate::primitives::install(&mut interp);
+
+        // Register bootstrap classes in global env so (class Foo ...) can reopen them
+        interp.register_bootstrap_classes();
+
         interp
+    }
+
+    /// Register all bootstrap classes in the global env so that
+    /// `(class Object ...)` etc. in stdlib files can reopen them.
+    fn register_bootstrap_classes(&mut self) {
+        let classes: Vec<Rc<RefCell<MoofClass>>> = vec![
+            self.object_class.clone(),
+            self.class_class.clone(),
+            self.integer_class.clone(),
+            self.float_class.clone(),
+            self.string_class.clone(),
+            self.symbol_class.clone(),
+            self.cons_class.clone(),
+            self.table_class.clone(),
+            self.closure_class.clone(),
+            self.range_class.clone(),
+            self.true_class.clone(),
+            self.false_class.clone(),
+            self.nil_class.clone(),
+            self.numeric_class.clone(),
+            self.error_class.clone(),
+            self.syntax_error_class.clone(),
+            self.runtime_error_class.clone(),
+            self.name_error_class.clone(),
+            self.type_error_class.clone(),
+            self.arity_error_class.clone(),
+            self.message_error_class.clone(),
+            self.io_error_class.clone(),
+        ];
+
+        for class_rc in classes {
+            let name_id = class_rc.borrow().name;
+            let metaclass = class_rc.borrow().metaclass.clone()
+                .unwrap_or_else(|| self.class_class.clone());
+            let class_obj = Value::Object(Rc::new(RefCell::new(MoofObject {
+                class: metaclass,
+                fields: Vec::new(),
+            })));
+            self.global_env.define(name_id, class_obj, false);
+        }
     }
 
     // ── Top-level evaluation ────────────────────────────────────────
@@ -498,6 +561,9 @@ impl Interpreter {
                     if id == k.super_send {
                         return self.eval_super_send(cdr, env);
                     }
+                    if id == k.__primitive {
+                        return self.eval_primitive(cdr, env);
+                    }
                     if id == k.table {
                         return self.eval_table(cdr, env);
                     }
@@ -610,6 +676,7 @@ impl Interpreter {
                         || id == k.require
                         || id == k.send
                         || id == k.super_send
+                        || id == k.__primitive
                         || id == k.table
                         || id == k.table_array
                         || id == k.str_interp
@@ -1204,18 +1271,202 @@ impl Interpreter {
         Ok(Value::Symbol(name_id))
     }
 
+    // ── __primitive ─────────────────────────────────────────────────
+
+    fn eval_primitive(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        // (__primitive name arg1 arg2 ...)
+        // name is a symbol (not evaluated as a variable), args are evaluated
+        let name_expr = nth_car(args, 0)?;
+        let name_id = match name_expr {
+            Value::Symbol(id) => *id,
+            _ => return Err(MoofError::runtime("__primitive: first argument must be a symbol")),
+        };
+
+        // Look up the primitive
+        let prim_fn = match self.primitive_registry.get(&name_id) {
+            Some(f) => *f,
+            None => {
+                let name = self.symbols.name(name_id).to_string();
+                return Err(MoofError::runtime(format!("__primitive: unknown primitive '{name}'")));
+            }
+        };
+
+        // Evaluate remaining args
+        let rest = nth_cdr(args, 0)?;
+        let prim_args = self.eval_args(rest, env)?;
+
+        // Call the primitive
+        prim_fn(self, prim_args)
+    }
+
     // ── require ─────────────────────────────────────────────────────
 
     fn eval_require(&mut self, args: &Value, env: &Env) -> Result<Value> {
         let path_expr = nth_car(args, 0)?;
         let path_val = self.eval(path_expr, env)?;
-        let path = path_val.as_str().map_err(|_| {
+        let raw_path = path_val.as_str().map_err(|_| {
             MoofError::runtime("require: expected string path")
-        })?;
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| MoofError::io(format!("require: cannot read '{}': {}", path, e)))?;
-        let filename = path.to_string();
-        self.load_source(&source, &filename)
+        })?.to_string();
+
+        // Resolve the path
+        let resolved = self.resolve_require_path(&raw_path)?;
+
+        // Canonicalize for cache key
+        let canonical = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
+
+        // Check cache
+        if let Some(cached) = self.loaded_modules.get(&canonical) {
+            return Ok(cached.clone());
+        }
+
+        // Circular dependency check
+        if self.loading_stack.contains(&canonical) {
+            return Err(MoofError::runtime(format!(
+                "require: circular dependency detected: {}",
+                canonical.display()
+            )));
+        }
+
+        // Read the file
+        let source = std::fs::read_to_string(&resolved)
+            .map_err(|e| MoofError::io(format!("require: cannot read '{}': {}", resolved.display(), e)))?;
+        let filename = resolved.to_string_lossy().to_string();
+
+        // Push onto loading stack, save current_file
+        self.loading_stack.push(canonical.clone());
+        let prev_file = self.current_file.take();
+        self.current_file = Some(resolved);
+
+        // Evaluate
+        let result = self.load_source(&source, &filename);
+
+        // Restore state
+        self.current_file = prev_file;
+        self.loading_stack.pop();
+
+        // Cache the result on success
+        match result {
+            Ok(val) => {
+                self.loaded_modules.insert(canonical, val.clone());
+                Ok(val)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Resolve a require path to an absolute file path.
+    /// Resolution order:
+    /// 1. Relative to the current file's directory
+    /// 2. MOOF_PATH entries (colon-separated env var)
+    /// 3. stdlib_dir (next to the binary)
+    fn resolve_require_path(&self, raw: &str) -> Result<PathBuf> {
+        let candidates = self.require_search_paths();
+        let extensions = ["", ".moof"];
+
+        for base in &candidates {
+            for ext in &extensions {
+                let mut path = base.join(raw);
+                if !ext.is_empty() {
+                    let with_ext = format!("{}{}", path.display(), ext);
+                    path = PathBuf::from(with_ext);
+                }
+                if path.is_file() {
+                    return Ok(path);
+                }
+            }
+        }
+
+        Err(MoofError::io(format!(
+            "require: cannot find '{}' (searched: {})",
+            raw,
+            candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        )))
+    }
+
+    /// Build the list of directories to search for require.
+    fn require_search_paths(&self) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+
+        // 1. Relative to current file
+        if let Some(ref current) = self.current_file {
+            if let Some(parent) = current.parent() {
+                paths.push(parent.to_path_buf());
+            }
+        }
+
+        // Also try CWD
+        if let Ok(cwd) = std::env::current_dir() {
+            paths.push(cwd);
+        }
+
+        // 2. MOOF_PATH entries
+        if let Ok(moof_path) = std::env::var("MOOF_PATH") {
+            for entry in moof_path.split(':') {
+                let p = PathBuf::from(entry);
+                if p.is_dir() {
+                    paths.push(p);
+                }
+            }
+        }
+
+        // 3. stdlib dir
+        if let Some(ref stdlib) = self.stdlib_dir {
+            paths.push(stdlib.clone());
+        }
+
+        paths
+    }
+
+    /// Load the prelude from the stdlib directory.
+    pub fn load_prelude(&mut self) -> Result<Value> {
+        // Find stdlib dir via several strategies
+        let stdlib_dir = self.find_stdlib_dir();
+
+        match stdlib_dir {
+            Some(dir) => {
+                self.stdlib_dir = Some(dir.clone());
+                let prelude = dir.join("prelude.moof");
+                let source = std::fs::read_to_string(&prelude)
+                    .map_err(|e| MoofError::io(format!("Failed to load prelude: {e}")))?;
+                self.current_file = Some(prelude);
+                let result = self.load_source(&source, "<prelude>");
+                self.current_file = None;
+                result
+            }
+            None => Ok(Value::Nil),
+        }
+    }
+
+    fn find_stdlib_dir(&self) -> Option<PathBuf> {
+        // 1. MOOF_STDLIB env var
+        if let Ok(dir) = std::env::var("MOOF_STDLIB") {
+            let p = PathBuf::from(&dir);
+            if p.join("prelude.moof").is_file() {
+                return Some(p);
+            }
+        }
+
+        // 2. stdlib/ in CWD
+        if let Ok(cwd) = std::env::current_dir() {
+            let p = cwd.join("stdlib");
+            if p.join("prelude.moof").is_file() {
+                return Some(p);
+            }
+        }
+
+        // 3. Relative to binary: ../stdlib, ../../stdlib
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                for ancestor in &["../stdlib", "../../stdlib", "stdlib"] {
+                    let p = exe_dir.join(ancestor);
+                    if p.join("prelude.moof").is_file() {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     // ── __send ──────────────────────────────────────────────────────
@@ -1524,18 +1775,23 @@ impl Interpreter {
                         }
                     }
                     // (method selector (params...) body...)
+                    // Multi-keyword selectors: (method foo:bar: (a b) body)
+                    // The parser splits foo:bar: into two symbols; we merge them.
                     else if kw == self.known.method {
-                        let sel = nth_car(&inner.cdr, 0)?;
-                        let sel_id = sel.as_symbol().map_err(|_| {
-                            MoofError::runtime("class method: expected symbol selector")
-                        })?;
-                        let params_expr = nth_car(&inner.cdr, 1)?;
+                        let (sel_id, rest_after_sel) = self.parse_method_selector(&inner.cdr)?;
+                        let params_expr = match rest_after_sel {
+                            Value::Cons(ref c) => &c.car,
+                            _ => return Err(MoofError::runtime("class method: expected params")),
+                        };
 
                         // Parse params, prepend `self`
                         let (mut params, rest_param) = self.parse_params(params_expr)?;
                         params.insert(0, self.known.self_);
 
-                        let method_body_list = nth_cdr(&inner.cdr, 1)?;
+                        let method_body_list = match rest_after_sel {
+                            Value::Cons(ref c) => &c.cdr,
+                            _ => return Err(MoofError::runtime("class method: expected body")),
+                        };
                         let body = self.wrap_body(method_body_list);
 
                         let closure = Value::Closure(Rc::new(MoofClosure {
@@ -1550,17 +1806,20 @@ impl Interpreter {
                     }
                     // (classmethod selector (params...) body...)
                     else if kw == self.known.classmethod {
-                        let sel = nth_car(&inner.cdr, 0)?;
-                        let sel_id = sel.as_symbol().map_err(|_| {
-                            MoofError::runtime("classmethod: expected symbol selector")
-                        })?;
-                        let params_expr = nth_car(&inner.cdr, 1)?;
+                        let (sel_id, rest_after_sel) = self.parse_method_selector(&inner.cdr)?;
+                        let params_expr = match rest_after_sel {
+                            Value::Cons(ref c) => &c.car,
+                            _ => return Err(MoofError::runtime("classmethod: expected params")),
+                        };
 
                         // Parse params, prepend `self` (self = the class object)
                         let (mut params, rest_param) = self.parse_params(params_expr)?;
                         params.insert(0, self.known.self_);
 
-                        let method_body_list = nth_cdr(&inner.cdr, 1)?;
+                        let method_body_list = match rest_after_sel {
+                            Value::Cons(ref c) => &c.cdr,
+                            _ => return Err(MoofError::runtime("classmethod: expected body")),
+                        };
                         let body = self.wrap_body(method_body_list);
 
                         let closure = Value::Closure(Rc::new(MoofClosure {
@@ -2270,15 +2529,28 @@ impl Interpreter {
                 }
                 drop(metaclass);
                 drop(obj);
-                Err(MoofError::runtime(format!(
-                    "Cannot call {}: not a function",
-                    callee.type_name()
-                )))
+                // Try callable protocol: [obj call: args]
+                return self.try_callable_protocol(callee, args);
             }
-            _ => Err(MoofError::runtime(format!(
-                "Cannot call {}: not a function",
+            _ => {
+                // Try callable protocol: [val call: args]
+                return self.try_callable_protocol(callee, args);
+            }
+        }
+    }
+
+    /// Try calling an object via the callable protocol: [obj call: args-list]
+    fn try_callable_protocol(&mut self, callee: Value, args: Vec<Value>) -> Result<Value> {
+        let call_sel = self.symbols.intern("call:");
+        let class = self.class_of(&callee);
+        if class.borrow().lookup(call_sel).is_some() {
+            let args_list = Value::from_slice(&args);
+            self.send_message(callee, call_sel, vec![args_list])
+        } else {
+            Err(MoofError::runtime(format!(
+                "Cannot call {}: not a function (does not respond to call:)",
                 callee.type_name()
-            ))),
+            )))
         }
     }
 
@@ -2351,6 +2623,44 @@ impl Interpreter {
         }
 
         Ok((positional, rest_param))
+    }
+
+    /// Parse a method selector from a cons list, merging multi-keyword selectors.
+    /// E.g. (replace_all: with: (from to) body) -> ("replace_all:with:", rest starting at (from to))
+    /// Single selectors like (foo (params) body) -> ("foo", rest starting at (params))
+    fn parse_method_selector(&mut self, args: &Value) -> Result<(SymId, Value)> {
+        let first = nth_car(args, 0)?;
+        let first_id = first.as_symbol().map_err(|_| {
+            MoofError::runtime("method: expected symbol selector")
+        })?;
+        let first_name = self.symbols.name(first_id).to_string();
+
+        // If the first symbol doesn't end with ':', it's a simple selector
+        if !first_name.ends_with(':') {
+            let rest = nth_cdr(args, 0)?;
+            return Ok((first_id, rest.clone()));
+        }
+
+        // Multi-keyword: consume all consecutive colon-terminated symbols
+        let mut combined = first_name;
+        let mut cursor = nth_cdr(args, 0)?;
+
+        loop {
+            if let Value::Cons(cell) = cursor {
+                if let Value::Symbol(id) = &cell.car {
+                    let name = self.symbols.name(*id).to_string();
+                    if name.ends_with(':') {
+                        combined.push_str(&name);
+                        cursor = &cell.cdr;
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+
+        let sel_id = self.symbols.intern(&combined);
+        Ok((sel_id, cursor.clone()))
     }
 
     /// Wrap a body cons list in a (do ...) form if it has multiple expressions,

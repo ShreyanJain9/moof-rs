@@ -525,30 +525,155 @@ All 6 example files produce identical output between tree-walker and bytecode VM
 
 ---
 
+## Session 6: Philosophy Rework & Self-Hosting
+
+### Starting point
+
+Moof had grown into a working language with a bytecode VM, but felt like "Lisp with Smalltalk bolted on." The interpreter had 26 special forms. `builtins.rs` was 2,556 lines of Rust-registered methods — many trivial (`nil?` returning false, `even?` doing `% 2`, `map:` iterating a list). The stdlib was 311 lines embedded via `include_str!`. The session's goal was to establish a coherent philosophy and self-host as much as possible in Moof.
+
+### The Moof Philosophy (established this session)
+
+1. **Everything is an object.** Numbers, strings, closures, classes, modules.
+2. **Everything is a message.** `(f x y)` means "send `call:` to f." Control flow is messages to booleans and blocks.
+3. **The evaluator is minimal.** ~12 true special forms, not 26.
+4. **Rust provides primitives, Moof provides methods.** A small `__primitive` FFI exposes ~50 raw operations. The stdlib wraps these into the full object protocol.
+5. **The stdlib is Moof files on disk.** Loaded via a real import system.
+
+### What was built
+
+**Phase 1 — Primitive FFI System** (`primitives.rs`, 990 lines)
+
+New `__primitive` special form that dispatches to a `HashMap<SymId, NativeFn>` registry on the Interpreter. ~50 primitives registered covering: polymorphic numeric ops (`num_add`, `num_sqrt`), integer-specific (`int_gcd`, `int_bit_and`), float-specific (`float_round`, `float_nan`), string ops (`str_length`, `str_upper`, `str_split`), cons/table ops, object introspection, symbol ops, I/O, and range field access. Numeric helpers (`numeric_add`, `numeric_sub`, etc.) are shared between primitives and the variadic global functions — no duplication.
+
+```moof
+(__primitive num_add 1 2)      ;; => 3
+(__primitive str_upper "hello") ;; => "HELLO"
+```
+
+**Phase 2 — Import System Overhaul**
+
+Rewrote `require` with:
+- **Path resolution**: relative to current file's directory, then CWD, then `MOOF_PATH` entries, then `stdlib_dir`
+- **Extension inference**: `(require "core")` finds `core.moof`
+- **Module caching**: `loaded_modules: HashMap<PathBuf, Value>` — each file eval'd once
+- **Circular detection**: `loading_stack: Vec<PathBuf>` — error if a file is already being loaded
+- **Current file tracking**: `current_file: Option<PathBuf>` — enables relative require from within loaded files
+
+`load_prelude()` finds the stdlib directory via `MOOF_STDLIB` env var, CWD, or binary-relative paths, and loads `stdlib/prelude.moof`.
+
+**Phase 3 — External Stdlib** (13 .moof files, 932 lines)
+
+Removed `include_str!` embedding. Created modular stdlib:
+
+```
+stdlib/
+  prelude.moof      — boot entry point, requires everything in order
+  core.moof         — Object base methods (to_s, nil?, ==, hash)
+  bool.moof         — TrueClass/FalseClass control flow + NilClass (list terminators)
+  numeric.moof      — Integer + Float methods via __primitive
+  string.moof       — String methods via __primitive
+  collections.moof  — Cons + Table methods (many pure Moof, some via __primitive)
+  closure.moof      — whileTrue:, whileFalse: (pure Moof, recursive)
+  range.moof        — Range iteration via __primitive field access
+  error.moof        — placeholder (Error methods need field access, stay in Rust)
+  symbol.moof       — Symbol methods via __primitive
+  functional.moof   — map, filter, reduce, compose, pipe, type checks, etc.
+  math.moof         — pi, e, factorial, power, trig conversions
+  adt.moof          — Option, Result, Pair ADTs
+  macros.moof       — when, unless, protocols
+```
+
+**Boot order matters**: NilClass must load before Cons because `[[self cdr] map: f]` terminates at nil — NilClass needs `map:` returning `(list)`, `filter:` returning `(list)`, `each:` returning nil, etc.
+
+**Key fix — Bootstrap class registration**: All 22 bootstrap classes (Object, Integer, String, etc.) are now registered as named bindings in the global env during `Interpreter::new()`. Without this, `(class Object ...)` in stdlib files created a NEW Object class instead of reopening the bootstrap one.
+
+**Key fix — Multi-keyword selector parsing**: Added `parse_method_selector()` to merge consecutive colon-terminated symbols in method definitions. The parser splits `replace_all:with:` into two tokens; the new method merges them before registering. This enabled multi-keyword methods like `(method replace_all:with: (from to) ...)` in .moof files.
+
+**builtins.rs shrunk from 2,556 → 540 lines** — kept only: variadic global functions (+, -, cons, print, etc.), Class.new, Object introspection (class, is_a:, responds_to:, send:), Closure invoke (value, value:, call:, curry:), and Error field access (message, to_s).
+
+**Phase 4 — Callable Protocol**
+
+Any object responding to `call:` can now be called with `(obj args...)`. When `invoke()` encounters a non-closure, non-metaclass value, it checks if the object's class has a `call:` method and dispatches `[obj call: args-as-list]`. ~15 lines in the evaluator.
+
+```moof
+(class Counter (fields count)
+  (method initialize (n) (set! count n))
+  (method call: (args) (set! count (+ count 1)) count))
+(define c [Counter new 0])
+(c) ;; => 1
+(c) ;; => 2
+(c) ;; => 3
+```
+
+**Phase 5 — Macro-ization** (deferred)
+
+Investigated converting `cond`, `type`, `protocol`, `trait` from special forms to macros. Found that `type` needs class creation + type registry, `protocol`/`trait` need interpreter registries, and `cond` would lose TCO. These need a proper meta-object protocol before they can be macro-ized. Kept as special forms.
+
+### LOC impact
+
+| Component | Before | After | Change |
+|-----------|--------|-------|--------|
+| `builtins.rs` | 2,556 | 540 | **-79%** |
+| `primitives.rs` | — | 990 | New |
+| `interpreter.rs` | 2,632 | 2,942 | +310 (import system, bootstrap, selectors) |
+| `stdlib/*.moof` | 311 (1 embedded file) | 932 (13 external files) | Self-hosted |
+| **Net Rust** | **~5,200** | **~4,470** | **-14%** |
+
+### Tested
+
+All 21 unit tests pass. All 6 example files produce identical output. New features tested:
+
+```moof
+;; Primitives
+(__primitive num_add 1 2)          ;; => 3
+(__primitive str_upper "hello")    ;; => "HELLO"
+
+;; Import system
+(require "stdlib/core")            ;; loads from disk, cached
+(require "/tmp/test.moof")         ;; absolute path
+(require "mylib")                  ;; .moof inferred, circular detection
+
+;; Self-hosted methods
+[3 even?]                          ;; => false (defined in stdlib/numeric.moof)
+["hello" uppercase]                ;; => "HELLO" (defined in stdlib/string.moof)
+[(list 3 1 2) sort]                ;; => (1 2 3) (pure Moof insertion sort)
+[{a: 1 b: 2} keys]                ;; => (a b) (via __primitive table_keys)
+
+;; Callable protocol
+(class Adder (fields n)
+  (method initialize (x) (set! n x))
+  (method call: (args) (+ n (car args))))
+(define add5 [Adder new 5])
+(add5 10)                          ;; => 15
+```
+
+---
+
 ## Final state
 
 The codebase at the end of these sessions:
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/interpreter.rs` | 2,632 | Tree-walking evaluator, class system, macros, modules |
-| `src/builtins.rs` | 2,556 | All built-in methods registered on type classes |
-| `src/repl.rs` | 1,188 | 15 meta-commands, tab completion, timing |
+| `src/interpreter.rs` | 2,942 | Tree-walking evaluator, class system, macros, modules, import system |
+| `src/primitives.rs` | 990 | Primitive FFI registry (~50 raw operations) |
 | `src/compiler.rs` | 927 | AST → bytecode compiler, upvalue resolution |
-| `src/vm.rs` | 732 | Stack-based bytecode VM, inline caching, TCO |
+| `src/repl.rs` | 1,184 | 15 meta-commands, tab completion, timing |
 | `src/parser.rs` | 701 | Recursive descent, all desugaring inline |
+| `src/vm.rs` | 732 | Stack-based bytecode VM, inline caching, TCO |
 | `src/moofint.rs` | 600 | BigInt with auto-promotion |
 | `src/value.rs` | 560 | 11-variant Value enum, Range, display, hashing |
-| `stdlib/stdlib.moof` | 311 | Self-hosting standard library |
+| `src/builtins.rs` | 540 | Variadic globals, Class.new, Object/Closure/Error intrinsics |
 | `src/lexer.rs` | 272 | Tokenizer |
 | `src/bytecode.rs` | 259 | Op enum (31 opcodes), CompiledFunction, builder |
-| `src/symbol.rs` | 205 | Symbol table, pre-interned known symbols |
-| `src/main.rs` | 168 | CLI entry point (`--bytecode` flag) |
+| `src/symbol.rs` | 207 | Symbol table, pre-interned known symbols |
+| `src/main.rs` | 165 | CLI entry point (`--bytecode` flag) |
 | `src/error.rs` | 152 | Error type with class hierarchy |
 | `src/cons.rs` | 114 | Cons cells, list iteration |
 | `src/environment.rs` | 95 | Scoped environments with SymId keys |
 | `src/token.rs` | 48 | Token enum |
-| `src/lib.rs` | 15 | Module declarations |
-| **Total** | **~11,535** | |
+| `src/lib.rs` | 16 | Module declarations |
+| `stdlib/*.moof` | 932 | External self-hosting standard library (13 files) |
+| **Total** | **~11,436** | |
 
-The language went from spec to Ruby prototype to Rust rewrite to elegant Rust to Smalltalk-inspired VM to bytecode compiler in five sessions. Each session followed the same discipline: plan first, define contracts, build in parallel, test against the example suite, fix what broke.
+The language went from spec to Ruby prototype to Rust rewrite to Smalltalk-inspired VM to bytecode compiler to self-hosting philosophy rework in six sessions. The key shift in session 6 was conceptual: Moof stopped being "Lisp + Smalltalk" and became a language with a coherent identity — everything is an object, everything is a message, and the language defines itself.

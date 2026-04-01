@@ -1,0 +1,284 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Collections — Cons (List) and Table methods
+;;
+;; NilClass list methods are defined in bool.moof and loaded first.
+;; ═══════════════════════════════════════════════════════════════════════
+
+;; ── List (Cons) ──────────────────────────────────────────────────────
+
+(class Cons
+  (method car () (__primitive cons_car self))
+  (method cdr () (__primitive cons_cdr self))
+  (method first () (__primitive cons_car self))
+  (method rest () (__primitive cons_cdr self))
+  (method length () (__primitive cons_length self))
+  (method empty? () false)
+  (method nil? () false)
+  (method class () "Cons")
+  (method to_s () (__primitive obj_to_s self))
+
+  (method last ()
+    (if (nil? (cdr self)) (car self)
+      [[self cdr] last]))
+
+  (method at: (idx)
+    (if (= idx 0) (car self)
+      (if (nil? (cdr self)) nil
+        [[self cdr] at: (- idx 1)])))
+
+  (method nth: (idx) [self at: idx])
+
+  (method contains: (x)
+    (if (= (car self) x) true
+      (if (nil? (cdr self)) false
+        [[self cdr] contains: x])))
+
+  (method reverse ()
+    (define (go lst acc)
+      (if (nil? lst) acc
+        (go (cdr lst) (cons (car lst) acc))))
+    (go self (list)))
+
+  (method map: (f)
+    (cons (f (car self)) [[self cdr] map: f]))
+
+  (method filter: (f)
+    (if (f (car self))
+      (cons (car self) [[self cdr] filter: f])
+      [[self cdr] filter: f]))
+
+  (method each: (f)
+    (f (car self))
+    (if (not (nil? (cdr self)))
+      [[self cdr] each: f]
+      nil))
+
+  (method any: (f)
+    (if (f (car self)) true
+      (if (nil? (cdr self)) false
+        [[self cdr] any: f])))
+
+  (method all: (f)
+    (if (not (f (car self))) false
+      (if (nil? (cdr self)) true
+        [[self cdr] all: f])))
+
+  (method none: (f)
+    (if (f (car self)) false
+      (if (nil? (cdr self)) true
+        [[self cdr] none: f])))
+
+  (method push: (x)
+    (if (nil? (cdr self))
+      (cons (car self) (cons x (list)))
+      (cons (car self) [[self cdr] push: x])))
+
+  (method append: (other)
+    (if (nil? (cdr self))
+      (cons (car self) other)
+      (cons (car self) [[self cdr] append: other])))
+
+  (method cons: (x)
+    (cons x self))
+
+  (method take: (n)
+    (if (<= n 0) (list)
+      (cons (car self) [[self cdr] take: (- n 1)])))
+
+  (method drop: (n)
+    (if (<= n 0) self
+      (if (nil? (cdr self)) (list)
+        [[self cdr] drop: (- n 1)])))
+
+  (method zip: (other)
+    (if (nil? other) (list)
+      (cons (list (car self) (car other))
+            [[self cdr] zip: (cdr other)])))
+
+  (method join: (sep)
+    (define (go lst)
+      (if (nil? (cdr lst))
+        (__primitive obj_to_s (car lst))
+        (__primitive str_concat
+          (__primitive str_concat (__primitive obj_to_s (car lst)) sep)
+          (go (cdr lst)))))
+    (go self))
+
+  (method reduce:init: (f init)
+    (define (go lst acc)
+      (if (nil? lst) acc
+        (go (cdr lst) (f acc (car lst)))))
+    (go self init))
+
+  (method flatten ()
+    (define (go lst acc)
+      (if (nil? lst) acc
+        (let ((item (car lst)))
+          (if (= (type-of item) "List")
+            (go (cdr lst) [acc append: [item flatten]])
+            (go (cdr lst) [acc push: item])))))
+    (go self (list)))
+
+  (method sort ()
+    ;; Simple insertion sort for cons lists
+    (define (insert x sorted)
+      (if (nil? sorted) (cons x (list))
+        (if (<= x (car sorted))
+          (cons x sorted)
+          (cons (car sorted) (insert x (cdr sorted))))))
+    (define (go lst acc)
+      (if (nil? lst) acc
+        (go (cdr lst) (insert (car lst) acc))))
+    (go self (list)))
+
+  (method sort_by: (key)
+    ;; Sort by key function
+    (define (insert x sorted)
+      (if (nil? sorted) (cons x (list))
+        (if (<= (key x) (key (car sorted)))
+          (cons x sorted)
+          (cons (car sorted) (insert x (cdr sorted))))))
+    (define (go lst acc)
+      (if (nil? lst) acc
+        (go (cdr lst) (insert (car lst) acc))))
+    (go self (list)))
+
+  (method uniq ()
+    (define (go lst seen)
+      (if (nil? lst) (list)
+        (if [seen contains: (car lst)]
+          (go (cdr lst) seen)
+          (cons (car lst) (go (cdr lst) (cons (car lst) seen))))))
+    (go self (list)))
+
+  ;; Derived methods
+  (method second () [self at: 1])
+  (method third () [self at: 2])
+  (method sum () [self reduce: + init: 0])
+  (method product () [self reduce: * init: 1])
+  (method min ()
+    [self reduce: { |best x| (if (< x best) x best) } init: (car self)])
+  (method max ()
+    [self reduce: { |best x| (if (> x best) x best) } init: (car self)])
+  (method compact () [self filter: { |x| (not (nil? x)) }])
+  (method enumerate () [self zip: (range [self length])])
+  (method flat-map: (f) [[self map: f] flatten])
+  (method count: (pred) [[self filter: pred] length]))
+
+;; ── Table (Map) ──────────────────────────────────────────────────────
+
+(class Table
+  (method length () (__primitive table_length self))
+  (method empty? () (= [self length] 0))
+  (method nil? () false)
+  (method class () "Table")
+  (method to_s () (__primitive obj_to_s self))
+
+  (method keys () (__primitive table_keys self))
+  (method values () (__primitive table_values self))
+
+  (method at: (key) (__primitive table_get self key))
+  (method get: (key) (__primitive table_get self key))
+  (method put:value: (key val) (__primitive table_put self key val))
+  (method set:to: (key val) (__primitive table_put self key val))
+  (method remove: (key) (__primitive table_remove self key))
+  (method has_key: (key) (__primitive table_has_key self key))
+
+  (method push: (val) (__primitive table_push self val))
+  (method pop () (__primitive table_pop self))
+  (method shift () (__primitive table_shift self))
+  (method unshift: (val) (__primitive table_unshift self val))
+
+  (method merge: (other) (__primitive table_merge self other))
+
+  (method first ()
+    (if (> [self length] 0)
+      (__primitive table_get self 0)
+      nil))
+
+  (method last ()
+    (let ((len [self length]))
+      (if (> len 0)
+        (__primitive table_get self (- len 1))
+        nil)))
+
+  (method has_value: (val)
+    (let ((vals [self values]))
+      (define (go lst)
+        (if (nil? lst) false
+          (if (= (car lst) val) true
+            (go (cdr lst)))))
+      (go vals)))
+
+  (method entries ()
+    (let ((ks [self keys]))
+      (define (go lst)
+        (if (nil? lst) (list)
+          (cons (list (car lst) [self at: (car lst)])
+                (go (cdr lst)))))
+      (go ks)))
+
+  (method each: (f)
+    (let ((ks [self keys]))
+      (define (go lst)
+        (if (nil? lst) nil
+          (do (f (car lst) [self at: (car lst)])
+              (go (cdr lst)))))
+      (go ks)))
+
+  (method map: (f)
+    (let ((ks [self keys]))
+      (define (go lst acc)
+        (if (nil? lst) acc
+          (let ((k (car lst))
+                (v [self at: k]))
+            (go (cdr lst) [acc put: k value: (f k v)]))))
+      (go ks {})))
+
+  (method filter: (pred)
+    (let ((ks [self keys]))
+      (define (go lst acc)
+        (if (nil? lst) acc
+          (let ((k (car lst))
+                (v [self at: k]))
+            (if (pred k v)
+              (go (cdr lst) [acc put: k value: v])
+              (go (cdr lst) acc)))))
+      (go ks {})))
+
+  (method select: (pred) [self filter: pred])
+
+  (method reject: (pred)
+    [self filter: { |k v| (not (pred k v)) }])
+
+  (method each_pair: (f) [self each: f])
+
+  (method each_with_index: (f)
+    (let ((ks [self keys]))
+      (define (go lst i)
+        (if (nil? lst) nil
+          (do (f (car lst) i)
+              (go (cdr lst) (+ i 1)))))
+      (go ks 0)))
+
+  (method find: (pred)
+    (let ((ks [self keys]))
+      (define (go lst)
+        (if (nil? lst) nil
+          (let ((v [self at: (car lst)]))
+            (if (pred v) v (go (cdr lst))))))
+      (go ks)))
+
+  (method count: (pred)
+    (let ((ks [self keys]))
+      (define (go lst n)
+        (if (nil? lst) n
+          (let ((v [self at: (car lst)]))
+            (go (cdr lst) (if (pred v) (+ n 1) n)))))
+      (go ks 0)))
+
+  (method compact ()
+    [self filter: { |k v| (not (nil? v)) }])
+
+  (method map-values: (f)
+    [self map: { |k v| (f v) }]))
