@@ -101,11 +101,22 @@ fn install_class_class_methods(interp: &mut Interpreter) {
         Ok(Value::Str(Rc::from(name.as_str())))
     });
 
-    // to_s — class prints as its name
+    // to_s / inspect — class prints as its name
     register_method(interp, &class, "to_s", |interp, args| {
         let real_class = interp.real_class_from_class_object(&args[0])?;
         let name = interp.symbols.name(real_class.borrow().name).to_string();
         Ok(Value::Str(Rc::from(name.as_str())))
+    });
+    register_method(interp, &class, "inspect", |interp, args| {
+        let real_class = interp.real_class_from_class_object(&args[0])?;
+        let name = interp.symbols.name(real_class.borrow().name).to_string();
+        Ok(Value::Str(Rc::from(name.as_str())))
+    });
+
+    // class — the class of a class is Class
+    register_method(interp, &class, "class", |interp, _args| {
+        let class_sym = interp.symbols.intern("Class");
+        Ok(interp.class_objects.get(&class_sym).cloned().unwrap_or(Value::Nil))
     });
 
     // superclass — return the superclass object (or nil)

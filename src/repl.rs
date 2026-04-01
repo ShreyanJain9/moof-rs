@@ -56,6 +56,42 @@ const COMMON_SELECTORS: &[&str] = &[
     "pow:", "max:", "min:", "sqrt",
 ];
 
+// ── REPL display via message sends ────────────────────────────────
+
+/// Display a value for the REPL by sending the `inspect` message.
+fn repl_inspect(val: &Value, interp: &mut crate::interpreter::Interpreter) -> String {
+    // For strings, quote them
+    if let Value::Str(s) = val {
+        return format!("{:?}", &**s);
+    }
+    // For nil, just show "nil"
+    if matches!(val, Value::Nil) {
+        return "nil".to_string();
+    }
+    // Try sending `inspect` message
+    let inspect_sel = interp.symbols.intern("inspect");
+    match interp.send_message(val.clone(), inspect_sel, vec![]) {
+        Ok(Value::Str(s)) => s.to_string(),
+        Ok(other) => format!("{}", other),
+        Err(_) => interp.display_value(val),
+    }
+}
+
+/// Get the type name for REPL display by sending `class` then `name`.
+fn repl_type_name(val: &Value, interp: &mut crate::interpreter::Interpreter) -> String {
+    let class_sel = interp.symbols.intern("class");
+    match interp.send_message(val.clone(), class_sel, vec![]) {
+        Ok(class_obj) => {
+            let name_sel = interp.symbols.intern("name");
+            match interp.send_message(class_obj, name_sel, vec![]) {
+                Ok(Value::Str(s)) => s.to_string(),
+                _ => val.type_name().to_string(),
+            }
+        }
+        Err(_) => val.type_name().to_string(),
+    }
+}
+
 // ── Symbol-resolving display ───────────────────────────────────────
 
 fn display_value(val: &Value, interp: &Interpreter) -> String {
@@ -362,8 +398,8 @@ pub fn run_repl() {
                         let _ = interp.global_env.set(underscore, result.clone());
 
                         let elapsed = eval_start.elapsed().as_secs_f64();
-                        let inspected = display_value(&result, &interp);
-                        let type_name = result.type_name();
+                        let inspected = repl_inspect(&result, &mut interp);
+                        let type_name = repl_type_name(&result, &mut interp);
 
                         if elapsed >= 0.1 {
                             println!(
