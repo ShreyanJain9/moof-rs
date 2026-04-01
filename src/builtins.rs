@@ -224,14 +224,14 @@ fn install_globals(interp: &mut Interpreter) {
     });
 
     // I/O
-    register(interp, "print", |_interp, args| {
-        let output: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+    register(interp, "print", |interp, args| {
+        let output: Vec<String> = args.iter().map(|a| interp.display_value(a)).collect();
         println!("{}", output.join(" "));
         Ok(Value::Nil)
     });
-    register(interp, "display", |_interp, args| {
+    register(interp, "display", |interp, args| {
         use std::io::Write;
-        let output: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
+        let output: Vec<String> = args.iter().map(|a| interp.display_value(a)).collect();
         print!("{}", output.join(" "));
         std::io::stdout().flush().ok();
         Ok(Value::Nil)

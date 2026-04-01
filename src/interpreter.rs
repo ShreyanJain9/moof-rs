@@ -388,6 +388,14 @@ impl Interpreter {
         match val {
             Value::Symbol(id) => self.symbols.try_name(*id).unwrap_or("?").to_string(),
             Value::Cons(_) => self.display_cons(val),
+            Value::Object(_) => {
+                // Check if this is a class object
+                if let Ok(real_class) = self.real_class_from_class_object(val) {
+                    let name = self.symbols.name(real_class.borrow().name);
+                    return name.to_string();
+                }
+                format!("{}", val)
+            }
             _ => format!("{}", val),
         }
     }
@@ -398,6 +406,25 @@ impl Interpreter {
             Value::Str(s) => format!("{:?}", &**s),
             Value::Symbol(id) => self.symbols.try_name(*id).unwrap_or("?").to_string(),
             Value::Cons(_) => self.display_cons(val),
+            Value::Object(obj) => {
+                // Check if this is a class object
+                if let Ok(real_class) = self.real_class_from_class_object(val) {
+                    let name = self.symbols.name(real_class.borrow().name);
+                    return name.to_string();
+                }
+                // Regular object: show class name + fields
+                let obj = obj.borrow();
+                let class_name = self.symbols.try_name(obj.class.borrow().name)
+                    .unwrap_or("?");
+                if obj.fields.is_empty() {
+                    format!("<{class_name}>")
+                } else {
+                    let fields: Vec<String> = obj.fields.iter()
+                        .map(|f| self.display_value(f))
+                        .collect();
+                    format!("<{class_name} {}>", fields.join(" "))
+                }
+            }
             _ => format!("{}", val),
         }
     }
