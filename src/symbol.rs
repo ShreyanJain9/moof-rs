@@ -101,6 +101,7 @@ pub struct KnownSymbols {
     pub handler_bind: SymId,
     pub restart_case: SymId,
     pub invoke_restart: SymId,
+    pub break_: SymId,
 }
 
 impl KnownSymbols {
@@ -167,6 +168,7 @@ impl KnownSymbols {
             handler_bind: syms.intern("handler-bind"),
             restart_case: syms.intern("restart-case"),
             invoke_restart: syms.intern("invoke-restart"),
+            break_: syms.intern("break"),
         }
     }
 }

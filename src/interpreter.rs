@@ -446,6 +446,17 @@ impl Interpreter {
         Ok(result)
     }
 
+    /// Parse and evaluate source in a specific environment (for break sub-REPL).
+    pub fn parse_and_eval(&mut self, source: &str, env: &Env) -> Result<Value> {
+        let tokens = crate::lexer::Lexer::new(source).tokenize()?;
+        let exprs = crate::parser::Parser::new(tokens, &mut self.symbols).parse_program()?;
+        let mut result = Value::Nil;
+        for expr in &exprs {
+            result = self.eval(expr, env)?;
+        }
+        Ok(result)
+    }
+
     pub fn load_source(&mut self, source: &str, _filename: &str) -> Result<Value> {
         let tokens = crate::lexer::Lexer::new(source).tokenize()?;
         let exprs = crate::parser::Parser::new(tokens, &mut self.symbols).parse_program()?;
@@ -700,6 +711,9 @@ impl Interpreter {
                     if id == k.invoke_restart {
                         return self.eval_invoke_restart(cdr, env);
                     }
+                    if id == k.break_ {
+                        return self.eval_break(env);
+                    }
                     if id == k.table {
                         return self.eval_table(cdr, env);
                     }
@@ -817,6 +831,7 @@ impl Interpreter {
                         || id == k.handler_bind
                         || id == k.restart_case
                         || id == k.invoke_restart
+                        || id == k.break_
                         || id == k.table
                         || id == k.table_array
                         || id == k.str_interp
@@ -1398,6 +1413,59 @@ impl Interpreter {
                 Err(e)
             }
         }
+    }
+
+    // ── break ───────────────────────────────────────────────────────
+
+    fn eval_break(&mut self, env: &Env) -> Result<Value> {
+        use std::io::{BufRead, Write};
+
+        eprintln!("\x1b[33m-- break --\x1b[0m");
+        eprintln!("\x1b[2mInteractive sub-REPL. Type :continue <value> to resume, :abort to error.\x1b[0m");
+
+        let stdin = std::io::stdin();
+        let mut last_result = Value::Nil;
+
+        loop {
+            eprint!("\x1b[33mbreak> \x1b[0m");
+            std::io::stderr().flush().ok();
+
+            let mut line = String::new();
+            if stdin.lock().read_line(&mut line).is_err() || line.is_empty() {
+                break;
+            }
+            let input = line.trim().to_string();
+            if input.is_empty() { continue; }
+
+            if input == ":abort" {
+                return Err(MoofError::runtime("Aborted from break"));
+            }
+            if input.starts_with(":continue") {
+                let rest = input.strip_prefix(":continue").unwrap().trim();
+                if rest.is_empty() {
+                    return Ok(last_result);
+                }
+                match self.parse_and_eval(rest, env) {
+                    Ok(val) => return Ok(val),
+                    Err(e) => {
+                        eprintln!("\x1b[31m{}\x1b[0m", e.message);
+                        continue;
+                    }
+                }
+            }
+
+            match self.parse_and_eval(&input, env) {
+                Ok(val) => {
+                    last_result = val.clone();
+                    let display = self.inspect_value(&val);
+                    eprintln!("\x1b[32m=> \x1b[0m{display}");
+                }
+                Err(e) => {
+                    eprintln!("\x1b[31m{}\x1b[0m", e.message);
+                }
+            }
+        }
+        Ok(last_result)
     }
 
     // ── signal ──────────────────────────────────────────────────────
@@ -2942,13 +3010,18 @@ impl Interpreter {
 
             // Variable binding
             Value::Symbol(id) => {
-                // Check if it starts with an uppercase letter — treat as constructor reference
+                // Check if it starts with an uppercase letter — treat as type/constructor match
                 let name = self.symbols.name(*id);
                 if name.starts_with(char::is_uppercase) {
-                    // Constructor pattern without fields: match class name
-                    if let Value::Object(obj_rc) = value {
-                        let obj = obj_rc.borrow();
-                        return obj.class.borrow().name == *id;
+                    // Match by class: walk the superclass chain of value's class
+                    let value_class = self.class_of(value);
+                    let mut current = Some(value_class);
+                    while let Some(cls) = current {
+                        if cls.borrow().name == *id {
+                            return true;
+                        }
+                        let sup = cls.borrow().superclass.clone();
+                        current = sup;
                     }
                     return false;
                 }
