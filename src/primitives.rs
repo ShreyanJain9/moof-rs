@@ -125,6 +125,10 @@ pub fn install(interp: &mut Interpreter) {
     reg(interp, "process_exit", prim_process_exit);
     reg(interp, "time_now", prim_time_now);
 
+    // ── REPL / eval ───────────────────────────────────────────────
+    reg(interp, "eval_string", prim_eval_string);
+    reg(interp, "parse_string", prim_parse_string);
+
     // ── Type introspection ─────────────────────────────────────────
     reg(interp, "type_of", prim_type_of);
     reg(interp, "closure_arity", prim_closure_arity);
@@ -1007,6 +1011,18 @@ fn prim_range_contains(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Va
 
 fn prim_obj_to_s(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
     Ok(Value::Str(Rc::from(format!("{}", args[0]).as_str())))
+}
+
+fn prim_eval_string(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let source = args[0].as_str()?;
+    interp.load_source(source, "<eval>")
+}
+
+fn prim_parse_string(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let source = args[0].as_str()?;
+    let tokens = crate::lexer::Lexer::new(source).tokenize()?;
+    let exprs = crate::parser::Parser::new(tokens, &mut interp.symbols).parse_program()?;
+    Ok(Value::from_slice(&exprs))
 }
 
 fn prim_pretty_print(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {

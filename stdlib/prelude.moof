@@ -33,3 +33,4 @@
 (require "adt")
 (require "macros")
 (require "conditions")
+(require "repl")

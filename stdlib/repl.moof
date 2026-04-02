@@ -1,0 +1,54 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; REPL — the Read-Eval-Print Loop as a Moof object
+;;
+;; The REPL is an object you can customize, extend, and replace.
+;; ═══════════════════════════════════════════════════════════════════════
+
+(class MoofREPL (fields prompt on-result on-error)
+
+  (method initialize ()
+    (set! prompt "moof> ")
+    (set! on-result { |val| (print val) })
+    (set! on-error  { |err| (print (format "Error: ~a" err)) }))
+
+  ;; Read a line from stdin
+  (method read ()
+    (display prompt)
+    (__primitive io_read_line))
+
+  ;; Evaluate a string of Moof code
+  (method eval: (source)
+    (__primitive eval_string source))
+
+  ;; Parse a string into an AST (list of expressions)
+  (method parse: (source)
+    (__primitive parse_string source))
+
+  ;; Pretty-print an expression
+  (method pretty-print: (expr)
+    (__primitive pretty_print expr))
+
+  ;; The core loop: read, eval, print, repeat
+  (method run ()
+    (define running true)
+    [{ || running } whileTrue: { ||
+      (let ((input [self read]))
+        (if (nil? input)
+          (set! running false)
+          (if (not (= [input trim] ""))
+            (try
+              (let ((result [self eval: input]))
+                (if (not (nil? result))
+                  ([self on-result] result)))
+              (catch e
+                ([self on-error] e))))))}])
+
+  ;; Run a single expression and return the result
+  (method eval-and-print: (source)
+    (try
+      (let ((result [self eval: source]))
+        ([self on-result] result)
+        result)
+      (catch e
+        ([self on-error] e)
+        nil))))
