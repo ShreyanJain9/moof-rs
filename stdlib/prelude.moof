@@ -34,3 +34,5 @@
 (require "macros")
 (require "conditions")
 (require "repl")
+(require "inspector")
+(require "browser")

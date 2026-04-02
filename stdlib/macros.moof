@@ -2,8 +2,8 @@
 ;; Macros — syntactic sugar
 ;; ═══════════════════════════════════════════════════════════════════════
 
-(defmacro unless (cond body) `(if (not ,cond) ,body nil))
-(defmacro when (cond body) `(if ,cond ,body nil))
+(defmacro unless (cond . body) `(if (not ,cond) (do ,@body) nil))
+(defmacro when (cond . body) `(if ,cond (do ,@body) nil))
 
 ;; ── Structured Bindings ──────────────────────────────────────────────
 
@@ -32,3 +32,54 @@
 
 (trait ShowableDefaults
   (method inspect () [self to_s]))
+
+(trait EnumerableDefaults
+  ;; Requires: each: (the fundamental iterator)
+  ;; Derives: map:, filter:, reduce:init:, any:, all:, none:, count:, to_list
+  (method map: (f)
+    (define result (list))
+    [self each: { |x| (set! result (cons (f x) result)) }]
+    (reverse result))
+  (method filter: (f)
+    (define result (list))
+    [self each: { |x| (when (f x) (set! result (cons x result))) }]
+    (reverse result))
+  (method reduce:init: (f init)
+    (define acc init)
+    [self each: { |x| (set! acc (f acc x)) }]
+    acc)
+  (method any: (f)
+    (define found false)
+    [self each: { |x| (when (f x) (set! found true)) }]
+    found)
+  (method all: (f)
+    (define ok true)
+    [self each: { |x| (unless (f x) (set! ok false)) }]
+    ok)
+  (method none: (f) (not [self any: f]))
+  (method count: (f)
+    [self reduce: { |n x| (if (f x) (+ n 1) n) } init: 0])
+  (method to_list ()
+    (define result (list))
+    [self each: { |x| (set! result (cons x result)) }]
+    (reverse result)))
+
+;; ── Destructuring ────────────────────────────────────────────────────
+
+;; Destructure a list into named bindings
+;; (let* ((a b c) (list 1 2 3)) body) → a=1, b=2, c=3
+;; Note: uses let* not let to avoid conflict with built-in let
+(defmacro let-list (bindings val . body)
+  (let ((temp-sym '__destructure_temp))
+    `(let ((,temp-sym ,val))
+       ,(let ((result `(do ,@body)))
+          (define (wrap-bindings names idx expr)
+            (if (nil? names) expr
+              `(let ((,(car names) [,temp-sym at: ,idx]))
+                 ,(wrap-bindings (cdr names) (+ idx 1) expr))))
+          (wrap-bindings bindings 0 result)))))
+
+(trait HashableDefaults
+  ;; Requires: hash, ==
+  ;; These are already on Object, but this documents the protocol
+  (method eql: (other) (= [self hash] [other hash])))

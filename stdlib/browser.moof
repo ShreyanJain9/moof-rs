@@ -1,0 +1,56 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Browser — class hierarchy browser as a Moof object
+;; ═══════════════════════════════════════════════════════════════════════
+
+(class ClassBrowser (fields current)
+
+  (method initialize ()
+    (set! current Object))
+
+  ;; Show the current class
+  (method show ()
+    (print (format "Class: ~a" [[self current] name]))
+    (when (not (nil? [[self current] superclass]))
+      (print (format "  extends: ~a" [[[self current] superclass] name])))
+    (let ((methods [[self current] methods]))
+      (when (not (nil? methods))
+        (print (format "  methods (~a):" [methods length]))
+        [methods each: { |m| (print (format "    ~a" m)) }]))
+    self)
+
+  ;; Navigate to a class by name
+  (method goto: (cls)
+    (set! current cls)
+    [self show])
+
+  ;; Navigate to superclass
+  (method up ()
+    (let ((sup [[self current] superclass]))
+      (if (nil? sup)
+        (do (print "No superclass") self)
+        (do (set! current sup) [self show]))))
+
+  ;; Show a method's source (via pretty-printer)
+  (method source: (method-name)
+    (let ((cls [self current])
+          (methods [cls methods]))
+      (print (format "~a>>~a" [cls name] method-name))
+      (print "  (source display requires method introspection — coming soon)")
+      self))
+
+  ;; List all known classes
+  (method all ()
+    (print "Known classes:")
+    ;; Walk the class_objects via introspection
+    (for-each { |cls-name|
+      (print (format "  ~a" cls-name))
+    } (list "Object" "Class" "Integer" "Float" "String" "Symbol"
+            "Cons" "Table" "Closure" "Range" "TrueClass" "FalseClass"
+            "NilClass" "Numeric" "Error"))
+    self))
+
+;; Convenience function
+(define (browse (cls Object))
+  (let ((b [ClassBrowser new]))
+    [b goto: cls]
+    b))

@@ -102,6 +102,7 @@ pub struct KnownSymbols {
     pub restart_case: SymId,
     pub invoke_restart: SymId,
     pub break_: SymId,
+    pub reload: SymId,
 }
 
 impl KnownSymbols {
@@ -169,6 +170,7 @@ impl KnownSymbols {
             restart_case: syms.intern("restart-case"),
             invoke_restart: syms.intern("invoke-restart"),
             break_: syms.intern("break"),
+            reload: syms.intern("reload"),
         }
     }
 }

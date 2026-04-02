@@ -5,6 +5,6 @@
 (class Symbol
   (method to_s () (__primitive sym_to_str self))
   (method to_sym () self)
-  (method inspect () (__primitive str_concat ":" (__primitive sym_to_str self)))
+  (method inspect () (__primitive str_concat "'" (__primitive sym_to_str self)))
   (method length () (__primitive sym_length self))
   (method nil? () false))

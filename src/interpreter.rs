@@ -758,6 +758,9 @@ impl Interpreter {
                     if id == k.break_ {
                         return self.eval_break(env);
                     }
+                    if id == k.reload {
+                        return self.eval_reload(cdr, env);
+                    }
                     if id == k.table {
                         return self.eval_table(cdr, env);
                     }
@@ -876,6 +879,7 @@ impl Interpreter {
                         || id == k.restart_case
                         || id == k.invoke_restart
                         || id == k.break_
+                        || id == k.reload
                         || id == k.table
                         || id == k.table_array
                         || id == k.str_interp
@@ -1510,6 +1514,45 @@ impl Interpreter {
             }
         }
         Ok(last_result)
+    }
+
+    // ── reload ──────────────────────────────────────────────────────
+
+    fn eval_reload(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        let path_expr = nth_car(args, 0)?;
+        let path_val = self.eval(path_expr, env)?;
+        let raw_path = path_val.as_str().map_err(|_| {
+            MoofError::runtime("reload: expected string path")
+        })?.to_string();
+
+        // Resolve the path
+        let resolved = self.resolve_require_path(&raw_path)?;
+        let canonical = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
+
+        // Remove from cache
+        self.loaded_modules.remove(&canonical);
+
+        // Re-require (will re-read and re-evaluate the file)
+        let source = std::fs::read_to_string(&resolved)
+            .map_err(|e| MoofError::io(format!("reload: cannot read '{}': {}", resolved.display(), e)))?;
+        let filename = resolved.to_string_lossy().to_string();
+
+        self.loading_stack.push(canonical.clone());
+        let prev_file = self.current_file.take();
+        self.current_file = Some(resolved);
+
+        let result = self.load_source(&source, &filename);
+
+        self.current_file = prev_file;
+        self.loading_stack.pop();
+
+        match result {
+            Ok(val) => {
+                self.loaded_modules.insert(canonical, val.clone());
+                Ok(val)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     // ── signal ──────────────────────────────────────────────────────
@@ -2684,17 +2727,20 @@ impl Interpreter {
             if let Value::Cons(inner) = &cell.car {
                 if let Value::Symbol(kw) = &inner.car {
                     if *kw == self.known.method {
-                        let sel = nth_car(&inner.cdr, 0)?;
-                        let sel_id = sel.as_symbol().map_err(|_| {
-                            MoofError::runtime("trait method: expected symbol selector")
-                        })?;
-                        let params_expr = nth_car(&inner.cdr, 1)?;
+                        let (sel_id, rest_after_sel) = self.parse_method_selector(&inner.cdr)?;
+                        let params_expr = match rest_after_sel {
+                            Value::Cons(ref c) => &c.car,
+                            _ => return Err(MoofError::runtime("trait method: expected params")),
+                        };
 
                         // Parse params, prepend `self`
                         let (mut params, rest_param) = self.parse_params(params_expr)?;
                         params.insert(0, self.known.self_);
 
-                        let method_body_list = nth_cdr(&inner.cdr, 1)?;
+                        let method_body_list = match rest_after_sel {
+                            Value::Cons(ref c) => &c.cdr,
+                            _ => return Err(MoofError::runtime("trait method: expected body")),
+                        };
                         let body = self.wrap_body(method_body_list);
 
                         let closure = Value::Closure(Rc::new(MoofClosure {

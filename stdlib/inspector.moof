@@ -1,0 +1,69 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Inspector — interactive object inspector as a Moof object
+;; ═══════════════════════════════════════════════════════════════════════
+
+(class Inspector (fields target path)
+
+  (method initialize (obj)
+    (set! target obj)
+    (set! path (list)))
+
+  ;; Show the current object's details
+  (method show ()
+    (let ((cls [[self target] class]))
+      (print (format "Object: ~a" [self target]))
+      (print (format "Class:  ~a" [cls name]))
+      (when (not (nil? [cls superclass]))
+        (print (format "Super:  ~a" [[cls superclass] name])))
+      (let ((methods [cls methods]))
+        (when (not (nil? methods))
+          (print (format "Methods (~a): ~a" [methods length] [methods join: ", "])))))
+    self)
+
+  ;; Inspect a field or send a message
+  (method send: (selector . args)
+    (let ((result (apply __send (cons [self target] (cons selector args)))))
+      (print (format "=> ~a" result))
+      result))
+
+  ;; Drill into a field value, pushing current object onto path
+  (method drill: (selector)
+    (let ((val [self send: selector]))
+      (set! path (cons [self target] path))
+      (set! target val)
+      [self show]))
+
+  ;; Go back up the path
+  (method back ()
+    (if (nil? path)
+      (do (print "Already at top") self)
+      (do
+        (set! target (car path))
+        (set! path (cdr path))
+        [self show])))
+
+  ;; Start an interactive inspection session
+  (method run ()
+    [self show]
+    (print "")
+    (print "Commands: (send: selector), (drill: field), (back), (quit)")
+    (define running true)
+    [{ || running } whileTrue: { ||
+      (display "inspect> ")
+      (let ((input (__primitive io_read_line)))
+        (if (= [input trim] "quit")
+          (set! running false)
+          (if (= [input trim] "")
+            nil
+            (try
+              (let ((result (__primitive eval_string input)))
+                (print (format "=> ~a" result)))
+              (catch e
+                (print (format "Error: ~a" [e message])))))))}])
+)
+
+;; Convenience function
+(define (inspect obj)
+  (let ((i [Inspector new obj]))
+    [i show]
+    i))
