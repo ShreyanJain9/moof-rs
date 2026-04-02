@@ -5,6 +5,23 @@
 (defmacro unless (cond . body) `(if (not ,cond) (do ,@body) nil))
 (defmacro when (cond . body) `(if ,cond (do ,@body) nil))
 
+;; while — explicit loop form
+(defmacro while (cond . body)
+  `[{ || ,cond } whileTrue: { || (do ,@body) }])
+
+;; dotimes — repeat N times with index
+(defmacro dotimes (var n . body)
+  `[,n times: (lambda (,var) ,@body)])
+
+;; -> already exists as pipeline, but let's add ->> (thread-last)
+;; and some other convenience forms
+
+;; assert-that — readable assertions
+(defmacro assert-that (expr . message)
+  (if (nil? message)
+    `(if (not ,expr) (error (format "Assertion failed: ~a" (quote ,expr))) true)
+    `(if (not ,expr) (error ,(car message)) true)))
+
 ;; ── Structured Bindings ──────────────────────────────────────────────
 
 ;; with-fields: bind object field values to local variables

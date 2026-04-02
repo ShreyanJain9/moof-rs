@@ -1,0 +1,54 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Server — REPL protocol backend
+;;
+;; A MoofServer is an object that handles REPL protocol messages.
+;; It can be driven by any frontend: CLI, TCP, web, editor plugin.
+;; ═══════════════════════════════════════════════════════════════════════
+
+(class MoofServer (fields repl)
+
+  (method initialize ()
+    (set! repl [MoofREPL new]))
+
+  ;; Evaluate source code, return result as a table
+  (method handle-eval: (source)
+    (try
+      (let ((result [repl eval: source]))
+        {status: "ok", value: result, display: (format "~a" result)})
+      (catch e
+        {status: "error", message: [e message]})))
+
+  ;; Parse source to AST
+  (method handle-parse: (source)
+    (try
+      (let ((ast [repl parse: source]))
+        {status: "ok", ast: ast})
+      (catch e
+        {status: "error", message: [e message]})))
+
+  ;; Pretty-print an expression
+  (method handle-pretty-print: (expr)
+    {status: "ok", source: [repl pretty-print: expr]})
+
+  ;; List all classes
+  (method handle-classes ()
+    ;; Use the class hierarchy
+    {status: "ok",
+     classes: (list "Object" "Class" "Numeric" "Integer" "Float"
+                    "String" "Symbol" "Cons" "Table" "Closure"
+                    "Range" "TrueClass" "FalseClass" "NilClass"
+                    "Error" "Condition" "Warning")})
+
+  ;; Get methods for a class
+  (method handle-methods: (cls)
+    {status: "ok", methods: [cls methods], name: [cls name]})
+
+  ;; Run a stdio protocol loop (one message per line, JSON-like tables)
+  (method run-stdio ()
+    (define running true)
+    [{ || running } whileTrue: { ||
+      (let ((line (__primitive io_read_line)))
+        (if (or (nil? line) (= [line trim] ""))
+          (set! running false)
+          (let ((result [self handle-eval: [line trim]]))
+            (print (format "~a" result)))))}]))

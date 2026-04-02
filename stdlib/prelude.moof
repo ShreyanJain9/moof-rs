@@ -36,3 +36,4 @@
 (require "repl")
 (require "inspector")
 (require "browser")
+(require "server")
