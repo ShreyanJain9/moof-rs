@@ -740,6 +740,46 @@ The REPL IS the development environment. Since Moof is homoiconic, the cons list
 [5 factorial]            ;; => 120
 ```
 
+### DRY Features (Session 7 continued)
+
+**Auto-generated field reader methods** — `(class Point (fields x y))` automatically generates `[p x]` and `[p y]` reader methods. No need to write boilerplate accessors.
+
+**`delegates-to` directive** — `(class Proxy (fields target) (delegates-to target))` generates a `doesNotUnderstand:` method that forwards all unknown messages to the target field. One-line proxy/delegation pattern.
+
+**Default parameter values** — `(define (connect host (port 8080) (timeout 30)) ...)`. Optional params with defaults after required params. Parser, interpreter, and arity check all updated. Defaults evaluated eagerly at definition time.
+
+**`with-fields` macro** — `(with-fields (x y) point body)` binds field values to local variables.
+
+**`ComparableDefaults` trait** — Define `>` on a class, `(uses ComparableDefaults)` gives you `<`, `>=`, `<=`, `min:`, `max:` for free.
+
+### Condition/Restart System (Session 7 continued)
+
+Common Lisp-style condition/restart system. Errors become conversations, not crashes.
+
+**Core forms:**
+- `(signal condition)` — signal a condition through the handler stack without unwinding
+- `(handler-bind ((Type handler) ...) body)` — dynamically bind handlers for condition types
+- `(restart-case expr (name (params) body) ...)` — offer named restart points
+- `(invoke-restart name args...)` — invoke a restart from within a handler
+
+**Key design:** `restart-case` integrates with regular errors, not just `(signal ...)`. When an error occurs inside `restart-case`, it runs the error through the handler stack before unwinding. This lets handlers invoke restarts even for regular `(error "...")` calls.
+
+```moof
+;; Safe division with recovery options
+(define (safe-div a b)
+  (restart-case (/ a b)
+    (use-value (v) v)
+    (retry-with (new-b) (/ a new-b))))
+
+;; Handler: use 0 on division error
+(handler-bind ((Error { |e| (invoke-restart use-value 0) }))
+  (safe-div 10 0))  ;; => 0
+
+;; Handler: retry with different divisor
+(handler-bind ((Error { |e| (invoke-restart retry-with 2) }))
+  (safe-div 10 0))  ;; => 5
+```
+
 ---
 
 ## Final state
