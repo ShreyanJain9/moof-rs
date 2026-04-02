@@ -685,31 +685,90 @@ Classes were identified by strings everywhere — `[3 class]` returned `"Integer
 
 ---
 
+## Session 7: Image-Based REPL
+
+### Starting point
+
+Moof had classes as first-class objects, a primitive FFI, external stdlib, and callable protocol. The next step: make the REPL a true development environment where you experiment live and save the running state.
+
+### Philosophy
+
+The REPL IS the development environment. Since Moof is homoiconic, the cons list IS the source — no source strings needed. A pretty-printer reconstructs readable Moof from the AST. An "image" is just a .moof file that recreates the running state when loaded.
+
+### What was built
+
+**Pretty-printer** (`src/pretty.rs`, ~330 lines) — Reverses the parser's desugaring to produce readable Moof source from cons list ASTs:
+- `(__send receiver "selector" args)` → `[receiver selector args]`
+- `(__send obj "key:val:" a b)` → `[obj key: a val: b]`
+- `(lambda (x) body)` → `{ |x| body }`
+- `(__table "k" v)` → `{k: v}`
+- `(__table-array v1 v2)` → `{v1, v2}`
+- `(__str-interp parts)` → `$"...\(expr)..."`
+- `(quote x)` → `'x`, `(quasiquote x)` → `` `x ``
+- `(define name (lambda (x) body))` → `(define (name x) body)`
+- Multi-line formatting with 2-space indentation for long expressions
+
+**Baseline snapshot** — `snapshot_baseline()` captures interpreter state after stdlib loads: method sets, global bindings, macros, types, protocols. Everything present at baseline is "stdlib"; anything added later is "user code."
+
+**Image serialization** (`src/image.rs`, ~300 lines) — `save_image()` walks interpreter state and emits a single .moof file containing only user-defined content:
+- User-defined classes (with fields, methods, superclass)
+- Methods added to bootstrap classes (e.g., `factorial` on Integer)
+- Global functions and variables
+- Macros, ADTs, protocols
+
+**REPL `,save` command** — `,save [path]` saves the current image. Default path: `image.moof`. Also available as `(save-image "path")` from code.
+
+**`pretty_print` primitive** — `(__primitive pretty_print expr)` pretty-prints any expression from Moof code.
+
+### Round-trip test
+
+```moof
+;; In the REPL, define things:
+(define (my-fib n) (if (<= n 1) n (+ (my-fib (- n 1)) (my-fib (- n 2)))))
+(class Dog (fields name breed)
+  (method to_s () (format "~a the ~a" name breed)))
+(class Integer
+  (method factorial () (if (<= self 1) 1 (* self [(- self 1) factorial]))))
+
+;; Save the image
+,save mywork.moof
+
+;; Start a new REPL, load the image:
+(require "mywork.moof")
+(my-fib 10)              ;; => 55
+[(Dog "Rex" "Lab") to_s] ;; => "Rex the Lab"
+[5 factorial]            ;; => 120
+```
+
+---
+
 ## Final state
 
 The codebase at the end of these sessions:
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/interpreter.rs` | 2,942 | Tree-walking evaluator, class system, macros, modules, import system |
-| `src/primitives.rs` | 990 | Primitive FFI registry (~50 raw operations) |
+| `src/interpreter.rs` | 3,096 | Tree-walking evaluator, class system, macros, modules, import system, baseline snapshot |
+| `src/repl.rs` | 1,232 | 16 meta-commands (incl. `,save`), tab completion, inspect via message sends |
+| `src/primitives.rs` | 998 | Primitive FFI registry (~50 raw operations + pretty_print) |
 | `src/compiler.rs` | 927 | AST → bytecode compiler, upvalue resolution |
-| `src/repl.rs` | 1,184 | 15 meta-commands, tab completion, timing |
-| `src/parser.rs` | 701 | Recursive descent, all desugaring inline |
 | `src/vm.rs` | 732 | Stack-based bytecode VM, inline caching, TCO |
+| `src/parser.rs` | 701 | Recursive descent, all desugaring inline |
+| `src/builtins.rs` | 604 | Variadic globals, Class introspection, Object/Closure/Error intrinsics |
 | `src/moofint.rs` | 600 | BigInt with auto-promotion |
 | `src/value.rs` | 560 | 11-variant Value enum, Range, display, hashing |
-| `src/builtins.rs` | 540 | Variadic globals, Class.new, Object/Closure/Error intrinsics |
+| `src/pretty.rs` | 469 | Pretty-printer: cons list AST → readable Moof source |
+| `src/image.rs` | 369 | Image serialization: save running state as .moof file |
 | `src/lexer.rs` | 272 | Tokenizer |
 | `src/bytecode.rs` | 259 | Op enum (31 opcodes), CompiledFunction, builder |
 | `src/symbol.rs` | 207 | Symbol table, pre-interned known symbols |
-| `src/main.rs` | 165 | CLI entry point (`--bytecode` flag) |
+| `src/main.rs` | 167 | CLI entry point (`--bytecode` flag) |
 | `src/error.rs` | 152 | Error type with class hierarchy |
 | `src/cons.rs` | 114 | Cons cells, list iteration |
 | `src/environment.rs` | 95 | Scoped environments with SymId keys |
 | `src/token.rs` | 48 | Token enum |
-| `src/lib.rs` | 16 | Module declarations |
-| `stdlib/*.moof` | 932 | External self-hosting standard library (13 files) |
-| **Total** | **~11,436** | |
+| `src/lib.rs` | 18 | Module declarations |
+| `stdlib/*.moof` | 931 | External self-hosting standard library (13 files) |
+| **Total** | **~12,551** | |
 
-The language went from spec to Ruby prototype to Rust rewrite to Smalltalk-inspired VM to bytecode compiler to self-hosting philosophy rework in six sessions. The key shift in session 6 was conceptual: Moof stopped being "Lisp + Smalltalk" and became a language with a coherent identity — everything is an object, everything is a message, and the language defines itself.
+The language went from spec to Ruby prototype to Rust rewrite to Smalltalk-inspired VM to bytecode compiler to self-hosting philosophy rework to image-based REPL in seven sessions. The running system IS the program — experiment in the REPL, `,save` your work, pick up where you left off.

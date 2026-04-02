@@ -65,6 +65,7 @@ fn print_usage() {
 fn run_source(source: &str, filename: &str, print_result: bool) {
     let mut interp = Interpreter::new();
     load_stdlib(&mut interp);
+    interp.snapshot_baseline();
 
     match interp.load_source(source, filename) {
         Ok(result) => {
@@ -85,6 +86,7 @@ fn run_source(source: &str, filename: &str, print_result: bool) {
 fn run_bytecode(source: &str, filename: &str, print_result: bool) {
     let mut interp = Interpreter::new();
     load_stdlib(&mut interp);
+    interp.snapshot_baseline();
 
     // Parse
     let exprs = match interp.parse_source(source, filename) {

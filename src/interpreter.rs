@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -79,6 +79,18 @@ pub struct Interpreter {
     pub loading_stack: Vec<PathBuf>,
     /// Base directory for stdlib files (set once at startup).
     pub stdlib_dir: Option<PathBuf>,
+
+    // ── Baseline snapshot (for image save) ─────────────────────────
+    /// (class_name_id, method_selector_id) pairs from after stdlib load.
+    pub baseline_methods: HashSet<(SymId, SymId)>,
+    /// Global binding SymIds from after stdlib load.
+    pub baseline_globals: HashSet<SymId>,
+    /// Macro names from after stdlib load.
+    pub baseline_macros: HashSet<SymId>,
+    /// Type (ADT) names from after stdlib load.
+    pub baseline_types: HashSet<SymId>,
+    /// Protocol names from after stdlib load.
+    pub baseline_protocols: HashSet<SymId>,
 }
 
 impl Interpreter {
@@ -292,6 +304,11 @@ impl Interpreter {
             loaded_modules: HashMap::new(),
             loading_stack: Vec::new(),
             stdlib_dir: None,
+            baseline_methods: HashSet::new(),
+            baseline_globals: HashSet::new(),
+            baseline_macros: HashSet::new(),
+            baseline_types: HashSet::new(),
+            baseline_protocols: HashSet::new(),
         };
 
         // Install built-in functions
@@ -344,6 +361,50 @@ impl Interpreter {
             })));
             self.global_env.define(name_id, class_obj.clone(), false);
             self.class_objects.insert(name_id, class_obj);
+        }
+    }
+
+    /// Snapshot the current state as the baseline (called after load_prelude).
+    /// Everything present at this point is "stdlib"; anything added later is "user".
+    pub fn snapshot_baseline(&mut self) {
+        // Snapshot methods on all known classes
+        let all_classes = self.all_type_classes();
+        for class_rc in &all_classes {
+            let class = class_rc.borrow();
+            let class_name = class.name;
+            for &sel in class.methods.keys() {
+                self.baseline_methods.insert((class_name, sel));
+            }
+        }
+
+        // Also snapshot user-defined classes from class_objects
+        for (&name_id, _) in &self.class_objects {
+            if let Some(class_rc) = self.find_class_by_name(name_id, &self.global_env.clone()) {
+                let class = class_rc.borrow();
+                for &sel in class.methods.keys() {
+                    self.baseline_methods.insert((name_id, sel));
+                }
+            }
+        }
+
+        // Snapshot global bindings
+        for (id, _) in self.global_env.bindings() {
+            self.baseline_globals.insert(id);
+        }
+
+        // Snapshot macros
+        for &id in self.macro_registry.keys() {
+            self.baseline_macros.insert(id);
+        }
+
+        // Snapshot types
+        for &id in self.type_registry.keys() {
+            self.baseline_types.insert(id);
+        }
+
+        // Snapshot protocols
+        for &id in self.protocol_registry.keys() {
+            self.baseline_protocols.insert(id);
         }
     }
 
@@ -461,7 +522,7 @@ impl Interpreter {
         result
     }
 
-    fn all_type_classes(&self) -> Vec<Rc<RefCell<MoofClass>>> {
+    pub fn all_type_classes(&self) -> Vec<Rc<RefCell<MoofClass>>> {
         vec![
             self.object_class.clone(),
             self.class_class.clone(),

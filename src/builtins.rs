@@ -343,6 +343,17 @@ fn install_globals(interp: &mut Interpreter) {
         Ok(Value::Bool(!args[0].is_truthy()))
     });
 
+    // Image save
+    register(interp, "save-image", |interp, args| {
+        let path = if args.is_empty() {
+            "image.moof".to_string()
+        } else {
+            args[0].as_str()?.to_string()
+        };
+        crate::image::save_image(interp, &path)?;
+        Ok(Value::Str(Rc::from(path.as_str())))
+    });
+
     // Introspection
     register(interp, "type-of", |interp, args| {
         check_arity("type-of", 1, &args)?;

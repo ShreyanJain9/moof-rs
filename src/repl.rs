@@ -43,8 +43,8 @@ const KEYWORDS: &[&str] = &[
 
 const META_COMMANDS: &[&str] = &[
     ",help", ",quit", ",exit", ",version", ",env", ",type", ",doc",
-    ",methods", ",classes", ",protocols", ",ast", ",load", ",time",
-    ",clear", ",reset",
+    ",methods", ",classes", ",protocols", ",ast", ",load", ",save",
+    ",time", ",clear", ",reset",
 ];
 
 const COMMON_SELECTORS: &[&str] = &[
@@ -329,6 +329,7 @@ pub fn run_repl() {
 
     let mut interp = Interpreter::new();
     load_stdlib(&mut interp);
+    interp.snapshot_baseline();
 
     // Define _ as mutable last-result holder
     let underscore = interp.symbols.intern("_");
@@ -478,6 +479,7 @@ fn handle_meta_command(input: &str, interp: &mut Interpreter) {
         ",protocols" => cmd_protocols(interp),
         ",ast" => cmd_ast(interp, arg),
         ",load" => cmd_load(interp, arg),
+        ",save" => cmd_save(interp, arg),
         ",time" => cmd_time(interp, arg),
         ",clear" => print!("\x1b[2J\x1b[H"),
         ",reset" => cmd_reset(interp),
@@ -500,6 +502,7 @@ fn cmd_help() {
     println!("  \x1b[36m,protocols\x1b[0m       List all registered protocols");
     println!("  \x1b[36m,ast\x1b[0m             Show parsed (desugared) form of an expression");
     println!("  \x1b[36m,load\x1b[0m            Load a .moof file");
+    println!("  \x1b[36m,save\x1b[0m            Save image to .moof file");
     println!("  \x1b[36m,time\x1b[0m            Benchmark an expression");
     println!("  \x1b[36m,clear\x1b[0m           Clear the screen");
     println!("  \x1b[36m,reset\x1b[0m           Reset the interpreter");
@@ -1030,9 +1033,18 @@ fn cmd_time(interp: &mut Interpreter, arg: &str) {
     }
 }
 
+fn cmd_save(interp: &mut Interpreter, arg: &str) {
+    let path = if arg.is_empty() { "image.moof" } else { arg };
+    match crate::image::save_image(interp, path) {
+        Ok(()) => println!("\x1b[32mImage saved to {path}\x1b[0m"),
+        Err(e) => println!("\x1b[31mError saving image: {}\x1b[0m", e.message),
+    }
+}
+
 fn cmd_reset(interp: &mut Interpreter) {
     *interp = Interpreter::new();
     load_stdlib(interp);
+    interp.snapshot_baseline();
     let underscore = interp.symbols.intern("_");
     interp.global_env.define(underscore, Value::Nil, true);
     println!("\x1b[32mInterpreter reset to fresh state\x1b[0m");

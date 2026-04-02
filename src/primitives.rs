@@ -120,6 +120,9 @@ pub fn install(interp: &mut Interpreter) {
     reg(interp, "range_length", prim_range_length);
     reg(interp, "range_contains", prim_range_contains);
 
+    // ── Pretty-print ───────────────────────────────────────────────
+    reg(interp, "pretty_print", prim_pretty_print);
+
     // ── Value display ──────────────────────────────────────────────
     reg(interp, "obj_to_s", prim_obj_to_s);
 }
@@ -987,4 +990,9 @@ fn prim_range_contains(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Va
 
 fn prim_obj_to_s(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
     Ok(Value::Str(Rc::from(format!("{}", args[0]).as_str())))
+}
+
+fn prim_pretty_print(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let result = crate::pretty::pretty_print(&args[0], &interp.symbols, &interp.known);
+    Ok(Value::Str(Rc::from(result.as_str())))
 }

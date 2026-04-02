@@ -10,6 +10,8 @@ pub mod parser;
 pub mod interpreter;
 pub mod builtins;
 pub mod primitives;
+pub mod pretty;
+pub mod image;
 pub mod bytecode;
 pub mod compiler;
 pub mod vm;
