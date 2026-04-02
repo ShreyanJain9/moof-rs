@@ -330,6 +330,7 @@ pub fn run_repl() {
     let mut interp = Interpreter::new();
     load_stdlib(&mut interp);
     interp.snapshot_baseline();
+    interp.interactive = true;
 
     // Define _ as mutable last-result holder
     let underscore = interp.symbols.intern("_");
@@ -417,7 +418,20 @@ pub fn run_repl() {
                         }
                     }
                     Err(e) => {
-                        print_error(&e, &input);
+                        if !interp.restart_stack.is_empty() {
+                            // Show restarts and enter mini-debugger
+                            eprintln!("\x1b[31mCondition: {}\x1b[0m", e.message);
+                            eprintln!("\x1b[33mAvailable restarts:\x1b[0m");
+                            for (i, frame) in interp.restart_stack.iter().rev().enumerate() {
+                                for name_id in &frame.restarts {
+                                    let name = interp.symbols.name(*name_id);
+                                    eprintln!("  \x1b[36m{i}: (invoke-restart {name} ...)\x1b[0m");
+                                }
+                            }
+                            eprintln!("\x1b[2mEvaluate (invoke-restart name args...) or any expression.\x1b[0m");
+                        } else {
+                            print_error(&e, &input);
+                        }
                     }
                 }
 

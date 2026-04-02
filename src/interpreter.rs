@@ -100,6 +100,9 @@ pub struct Interpreter {
     // ── Condition/restart system ───────────────────────────────────
     pub handler_stack: Vec<HandlerFrame>,
     pub restart_stack: Vec<RestartFrame>,
+    /// Whether we're running interactively (REPL). If true, unhandled signals
+    /// enter a debugger instead of raising an error.
+    pub interactive: bool,
 
     // ── Baseline snapshot (for image save) ─────────────────────────
     /// (class_name_id, method_selector_id) pairs from after stdlib load.
@@ -327,6 +330,7 @@ impl Interpreter {
             stdlib_dir: None,
             handler_stack: Vec::new(),
             restart_stack: Vec::new(),
+            interactive: false,
             baseline_methods: HashSet::new(),
             baseline_globals: HashSet::new(),
             baseline_macros: HashSet::new(),
