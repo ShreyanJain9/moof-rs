@@ -16,6 +16,20 @@
 ;; -> already exists as pipeline, but let's add ->> (thread-last)
 ;; and some other convenience forms
 
+;; cond — multi-branch conditional (macro version, supplements the special form)
+;; This provides a cleaner syntax when you want it
+(defmacro cond* (. clauses)
+  (define (expand cls)
+    (if (nil? cls) 'nil
+      (let ((clause (car cls))
+            (rest (cdr cls)))
+        (let ((test (car clause))
+              (body (car (cdr clause))))
+          (if (= test 'else)
+            body
+            `(if ,test ,body ,(expand rest)))))))
+  (expand clauses))
+
 ;; assert-that — readable assertions
 (defmacro assert-that (expr . message)
   (if (nil? message)
