@@ -29,7 +29,9 @@
       "Bash(./target/debug/moof -e '[\"\"hello\"\" uppercase]')",
       "Bash(./target/debug/moof -e '\\(car \\(list 1 2 3\\)\\)')",
       "Bash(./target/debug/moof -e '\\(cdr \\(list 1 2 3\\)\\)')",
-      "Bash(git merge:*)"
+      "Bash(git merge:*)",
+      "Bash(git push:*)",
+      "Bash(for i:*)"
     ]
   }
 }

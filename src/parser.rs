@@ -654,8 +654,18 @@ impl<'a> Parser<'a> {
                 params.push(self.sym(&rest_name));
                 break;
             }
-            let (name, _, _) = self.expect_identifier("Expected parameter name")?;
-            params.push(self.sym(&name));
+            // Support (param default-expr) for optional parameters
+            if matches!(self.current().ty, TokenType::LParen) {
+                self.pos += 1; // consume (
+                let (name, _, _) = self.expect_identifier("Expected parameter name in default pair")?;
+                let default = self.parse_expression()?;
+                self.expect(&TokenType::RParen, "Expected ')' after default value")?;
+                // Emit as (name default) cons pair
+                params.push(Self::list(vec![self.sym(&name), default]));
+            } else {
+                let (name, _, _) = self.expect_identifier("Expected parameter name")?;
+                params.push(self.sym(&name));
+            }
         }
         Ok(Self::list(params))
     }

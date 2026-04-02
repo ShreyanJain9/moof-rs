@@ -216,6 +216,9 @@ pub struct MoofClosure {
     pub name: Option<SymId>,
     pub params: Vec<SymId>,
     pub rest_param: Option<SymId>,
+    /// Default values for optional parameters. Index corresponds to params index.
+    /// None = required, Some(val) = optional with default.
+    pub defaults: Vec<Option<Value>>,
     pub body: ClosureBody,
     pub env: crate::environment::Env,
     /// Captured upvalues for bytecode closures (empty for Expr/Native closures)
@@ -267,6 +270,7 @@ impl Clone for MoofClosure {
             name: self.name,
             params: self.params.clone(),
             rest_param: self.rest_param,
+            defaults: self.defaults.clone(),
             body: self.body.clone(),
             env: self.env.clone(),
             upvalues: self.upvalues.clone(),

@@ -446,6 +446,7 @@ impl<'a> Compiler<'a> {
             name,
             params: Vec::new(),
             rest_param: None,
+                    defaults: Vec::new(),
             body: ClosureBody::Bytecode(Rc::new(func)),
             env: env_placeholder,
             upvalues: Vec::new(), // populated at runtime by MakeClosure

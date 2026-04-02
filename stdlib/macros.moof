@@ -5,9 +5,30 @@
 (defmacro unless (cond body) `(if (not ,cond) ,body nil))
 (defmacro when (cond body) `(if ,cond ,body nil))
 
+;; ── Structured Bindings ──────────────────────────────────────────────
+
+;; with-fields: bind object field values to local variables
+;; Usage: (with-fields (x y) point (+ (* x x) (* y y)))
+;; Note: requires fields to be accessible as methods on the object
+(defmacro with-fields (fields obj . body)
+  (let ((bindings (map { |f| (list f (list (quote __send) obj f)) } fields)))
+    `(let ,bindings ,@body)))
+
 ;; ── Protocols ────────────────────────────────────────────────────────
 
 (protocol Countable  length)
 (protocol Iterable   map: filter: each:)
 (protocol Comparable >)
 (protocol Showable   to_s)
+
+;; ── Default Traits (derive pattern) ──────────────────────────────────
+
+(trait ComparableDefaults
+  (method < (other) (not (or [self > other] (= self other))))
+  (method >= (other) (or [self > other] (= self other)))
+  (method <= (other) (not [self > other]))
+  (method min: (other) (if [self <= other] self other))
+  (method max: (other) (if [self >= other] self other)))
+
+(trait ShowableDefaults
+  (method inspect () [self to_s]))

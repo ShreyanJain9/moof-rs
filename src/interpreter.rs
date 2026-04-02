@@ -1046,8 +1046,13 @@ impl Interpreter {
                 let params_list = &cell.cdr;
                 let body_list = nth_cdr(args, 0)?;
 
-                // Parse params
-                let (params, rest_param) = self.parse_params(params_list)?;
+                // Parse params (with defaults)
+                let (params, rest_param, defaults) = self.parse_params_with_defaults(params_list)?;
+
+                // Evaluate default expressions now (eager, like Python)
+                let eval_defaults: Vec<Option<Value>> = defaults.into_iter().map(|d| {
+                    d.map(|expr| self.eval(&expr, env).unwrap_or(Value::Nil))
+                }).collect();
 
                 // Wrap body in (do ...) if multiple expressions
                 let body = self.wrap_body(body_list);
@@ -1056,9 +1061,10 @@ impl Interpreter {
                     name: Some(name_id),
                     params,
                     rest_param,
+                    defaults: eval_defaults,
                     body: ClosureBody::Expr(body),
                     env: env.clone(),
-                            upvalues: Vec::new(),
+                    upvalues: Vec::new(),
                 });
                 let val = Value::Closure(closure);
                 env.define(name_id, val.clone(), true);
@@ -1091,13 +1097,20 @@ impl Interpreter {
         let params_expr = nth_car(args, 0)?;
         let body_list = nth_cdr(args, 0)?;
 
-        let (params, rest_param) = self.parse_params(params_expr)?;
+        let (params, rest_param, defaults) = self.parse_params_with_defaults(params_expr)?;
+
+        // Evaluate default expressions eagerly
+        let eval_defaults: Vec<Option<Value>> = defaults.into_iter().map(|d| {
+            d.map(|expr| self.eval(&expr, env).unwrap_or(Value::Nil))
+        }).collect();
+
         let body = self.wrap_body(body_list);
 
         Ok(Value::Closure(Rc::new(MoofClosure {
             name: None,
             params,
             rest_param,
+            defaults: eval_defaults,
             body: ClosureBody::Expr(body),
             env: env.clone(),
                             upvalues: Vec::new(),
@@ -1357,9 +1370,10 @@ impl Interpreter {
             name: Some(name_id),
             params,
             rest_param,
+            defaults: Vec::new(),
             body: ClosureBody::Expr(body),
             env: env.clone(),
-                            upvalues: Vec::new(),
+            upvalues: Vec::new(),
         }));
 
         self.macro_registry.insert(name_id, closure);
@@ -1926,6 +1940,43 @@ impl Interpreter {
                             tcursor = &tc.cdr;
                         }
                     }
+                    // (delegates-to field-name) — auto-forward unknown messages
+                    else if kw == self.known.delegates_to {
+                        let target_field = nth_car(&inner.cdr, 0)?;
+                        let target_id = target_field.as_symbol().map_err(|_| {
+                            MoofError::runtime("delegates-to: expected field name symbol")
+                        })?;
+                        // Generate: (method doesNotUnderstand: (msg)
+                        //   [target send: [msg at: "selector"]])
+                        let dnu_sel = self.symbols.intern("doesNotUnderstand:");
+                        let msg_sym = self.symbols.intern("__dnu_msg");
+
+                        // Build: (__send __dnu_msg "at:" "selector")
+                        let get_selector = Value::from_slice(&[
+                            Value::Symbol(self.known.send),
+                            Value::Symbol(msg_sym),
+                            Value::Str(Rc::from("at:")),
+                            Value::Str(Rc::from("selector")),
+                        ]);
+                        // Build: (__send target <get_selector>)
+                        // This sends the forwarded message to the target
+                        let body = Value::from_slice(&[
+                            Value::Symbol(self.known.send),
+                            Value::Symbol(target_id),
+                            get_selector,
+                        ]);
+
+                        let closure = Value::Closure(Rc::new(MoofClosure {
+                            name: Some(dnu_sel),
+                            params: vec![self.known.self_, msg_sym],
+                            rest_param: None,
+                            defaults: Vec::new(),
+                            body: ClosureBody::Expr(body),
+                            env: env.clone(),
+                            upvalues: Vec::new(),
+                        }));
+                        methods.push((dnu_sel, closure));
+                    }
                     // (method selector (params...) body...)
                     // Multi-keyword selectors: (method foo:bar: (a b) body)
                     // The parser splits foo:bar: into two symbols; we merge them.
@@ -1950,6 +2001,7 @@ impl Interpreter {
                             name: Some(sel_id),
                             params,
                             rest_param,
+                            defaults: Vec::new(),
                             body: ClosureBody::Expr(body),
                             env: env.clone(),
                             upvalues: Vec::new(),
@@ -1978,6 +2030,7 @@ impl Interpreter {
                             name: Some(sel_id),
                             params,
                             rest_param,
+                            defaults: Vec::new(),
                             body: ClosureBody::Expr(body),
                             env: env.clone(),
                             upvalues: Vec::new(),
@@ -2057,6 +2110,26 @@ impl Interpreter {
             let mut klass = new_class.borrow_mut();
             for (sel, closure) in methods {
                 klass.add_method(sel, closure);
+            }
+
+            // Auto-generate reader methods for fields that don't have explicit methods
+            let all_fields = klass.all_field_names();
+            for &field_id in &all_fields {
+                if klass.methods.contains_key(&field_id) {
+                    continue; // explicit method already defined
+                }
+                // Generate: (method field_name () field_name)
+                // Body is just the symbol for the field name (which resolves to the field binding)
+                let reader = Value::Closure(Rc::new(MoofClosure {
+                    name: Some(field_id),
+                    params: vec![self.known.self_],
+                    rest_param: None,
+                    defaults: Vec::new(),
+                    body: ClosureBody::Expr(Value::Symbol(field_id)),
+                    env: self.global_env.clone(),
+                    upvalues: Vec::new(),
+                }));
+                klass.add_method(field_id, reader);
             }
         }
 
@@ -2186,6 +2259,7 @@ impl Interpreter {
                             name: Some(sel_id),
                             params,
                             rest_param,
+                            defaults: Vec::new(),
                             body: ClosureBody::Expr(body),
                             env: env.clone(),
                             upvalues: Vec::new(),
@@ -2742,30 +2816,52 @@ impl Interpreter {
         Ok(result)
     }
 
-    /// Parse a params list into (positional_params, optional_rest_param).
-    /// Supports `(a b c)` and `(a b . rest)` via & or dot notation.
+    /// Parse a params list into (positional_params, optional_rest_param, defaults).
+    /// Supports `(a b c)`, `(a b . rest)`, and `(a (b 10) (c 20))` for defaults.
     fn parse_params(&self, params: &Value) -> Result<(Vec<SymId>, Option<SymId>)> {
+        let (params, rest, _defaults) = self.parse_params_with_defaults(params)?;
+        Ok((params, rest))
+    }
+
+    fn parse_params_with_defaults(&self, params: &Value) -> Result<(Vec<SymId>, Option<SymId>, Vec<Option<Value>>)> {
         let mut positional = Vec::new();
+        let mut defaults = Vec::new();
         let mut rest_param = None;
+        let mut seen_default = false;
         let mut cursor = params;
 
         while let Value::Cons(cell) = cursor {
-            let id = cell.car.as_symbol().map_err(|_| {
-                MoofError::runtime("Expected symbol in parameter list")
-            })?;
-
-            // Check for rest param marker: a symbol named "&" or "."
-            let name = self.symbols.name(id);
-            if name == "&" || name == "." {
-                // Next element is the rest param
-                let rest_expr = nth_car(&cell.cdr, 0)?;
-                rest_param = Some(rest_expr.as_symbol().map_err(|_| {
-                    MoofError::runtime("Expected symbol after & in parameter list")
-                })?);
-                break;
+            match &cell.car {
+                // (param-name default-value) — optional parameter
+                Value::Cons(pair) => {
+                    let id = pair.car.as_symbol().map_err(|_| {
+                        MoofError::runtime("Expected symbol in parameter default pair")
+                    })?;
+                    let default_val = nth_car(&pair.cdr, 0)?;
+                    positional.push(id);
+                    defaults.push(Some(default_val.clone()));
+                    seen_default = true;
+                }
+                // plain symbol — required parameter or rest marker
+                Value::Symbol(id) => {
+                    let name = self.symbols.name(*id);
+                    if name == "&" || name == "." {
+                        let rest_expr = nth_car(&cell.cdr, 0)?;
+                        rest_param = Some(rest_expr.as_symbol().map_err(|_| {
+                            MoofError::runtime("Expected symbol after & in parameter list")
+                        })?);
+                        break;
+                    }
+                    if seen_default {
+                        return Err(MoofError::runtime(
+                            "Required parameter cannot follow optional parameter"
+                        ));
+                    }
+                    positional.push(*id);
+                    defaults.push(None);
+                }
+                _ => return Err(MoofError::runtime("Expected symbol or (symbol default) in parameter list")),
             }
-
-            positional.push(id);
             cursor = &cell.cdr;
         }
 
@@ -2776,7 +2872,7 @@ impl Interpreter {
             }
         }
 
-        Ok((positional, rest_param))
+        Ok((positional, rest_param, defaults))
     }
 
     /// Parse a method selector from a cons list, merging multi-keyword selectors.
@@ -2897,20 +2993,32 @@ fn setup_call_env(
     let n_params = closure.params.len();
     let has_rest = closure.rest_param.is_some();
 
-    // Arity check
+    // Count required params (those without defaults)
+    let n_required = if closure.defaults.is_empty() {
+        n_params
+    } else {
+        closure.defaults.iter().take_while(|d| d.is_none()).count()
+    };
+
+    // Arity check (accounting for defaults)
     if has_rest {
-        if args.len() < n_params {
+        if args.len() < n_required {
             let name = closure.name.map(|id| interp.symbols.name(id).to_string());
             return Err(MoofError::arity(
-                &format!("at least {n_params}"),
+                &format!("at least {n_required}"),
                 args.len(),
                 name.as_deref(),
             ));
         }
-    } else if args.len() != n_params {
+    } else if args.len() < n_required || args.len() > n_params {
         let name = closure.name.map(|id| interp.symbols.name(id).to_string());
+        let expected = if n_required == n_params {
+            n_params.to_string()
+        } else {
+            format!("{n_required}-{n_params}")
+        };
         return Err(MoofError::arity(
-            &n_params.to_string(),
+            &expected,
             args.len(),
             name.as_deref(),
         ));
@@ -2919,9 +3027,15 @@ fn setup_call_env(
     // Create child env from closure's captured env
     let call_env = closure.env.child();
 
-    // Bind positional params
+    // Bind positional params (with defaults for missing args)
     for (i, &param_id) in closure.params.iter().enumerate() {
-        let val = args.get(i).cloned().unwrap_or(Value::Nil);
+        let val = if let Some(v) = args.get(i) {
+            v.clone()
+        } else if let Some(Some(default)) = closure.defaults.get(i) {
+            default.clone()
+        } else {
+            Value::Nil
+        };
         call_env.define(param_id, val, false);
     }
 

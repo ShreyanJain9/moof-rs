@@ -96,6 +96,7 @@ pub struct KnownSymbols {
     pub __current_class: SymId,
     pub classmethod: SymId,
     pub __primitive: SymId,
+    pub delegates_to: SymId,
 }
 
 impl KnownSymbols {
@@ -157,6 +158,7 @@ impl KnownSymbols {
             __current_class: syms.intern("__current_class"),
             classmethod: syms.intern("classmethod"),
             __primitive: syms.intern("__primitive"),
+            delegates_to: syms.intern("delegates-to"),
         }
     }
 }
