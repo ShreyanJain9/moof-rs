@@ -1,0 +1,52 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; JSON — serialization of Moof values to JSON strings
+;;
+;; Pure Moof implementation — no Rust dependencies needed.
+;; Moof tables map naturally to JSON objects/arrays.
+;; ═══════════════════════════════════════════════════════════════════════
+
+(define (json-encode val)
+  (match val
+    (NilClass "null")
+    (TrueClass "true")
+    (FalseClass "false")
+    (Integer (format "~a" val))
+    (Float (format "~a" val))
+    (String (json-encode-string val))
+    (Cons (json-encode-array val))
+    (_ (if [val is_a: Table]
+         (json-encode-object val)
+         (format "~a" val)))))
+
+(define (json-encode-string s)
+  (define result "\"")
+  (define (go i)
+    (when (< i [s length])
+      (let ((ch [s at: i]))
+        (set! result [result concat:
+          (match ch
+            ("\"" "\\\"")
+            ("\\" "\\\\")
+            ("\n" "\\n")
+            ("\t" "\\t")
+            (_ ch))]))
+      (go (+ i 1))))
+  (go 0)
+  [result concat: "\""])
+
+(define (json-encode-array lst)
+  (define parts (map json-encode lst))
+  (format "[~a]" [parts join: ", "]))
+
+(define (json-encode-object tbl)
+  (define ks [tbl keys])
+  (define parts
+    (map { |k| (format "~a: ~a"
+                 (json-encode (format "~a" k))
+                 (json-encode [tbl at: k])) }
+         ks))
+  (format "{~a}" [parts join: ", "]))
+
+;; Add to_json method on all objects
+(class Object
+  (method to_json () (json-encode self)))

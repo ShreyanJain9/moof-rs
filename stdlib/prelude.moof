@@ -36,4 +36,5 @@
 (require "repl")
 (require "inspector")
 (require "browser")
+(require "json")
 (require "server")

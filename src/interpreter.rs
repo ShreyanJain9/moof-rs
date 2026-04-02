@@ -1469,7 +1469,19 @@ impl Interpreter {
         use std::io::{BufRead, Write};
 
         eprintln!("\x1b[33m-- break --\x1b[0m");
-        eprintln!("\x1b[2mInteractive sub-REPL. Type :continue <value> to resume, :abort to error.\x1b[0m");
+
+        // Show local bindings
+        let bindings = env.bindings();
+        if !bindings.is_empty() {
+            eprintln!("\x1b[2mLocal bindings:\x1b[0m");
+            for (id, val) in &bindings {
+                let name = self.symbols.name(*id);
+                if !name.starts_with("__") {
+                    eprintln!("  \x1b[36m{}\x1b[0m = {}", name, self.display_value(val));
+                }
+            }
+        }
+        eprintln!("\x1b[2mType :continue <value> to resume, :abort to error, :locals to show bindings.\x1b[0m");
 
         let stdin = std::io::stdin();
         let mut last_result = Value::Nil;
@@ -1487,6 +1499,15 @@ impl Interpreter {
 
             if input == ":abort" {
                 return Err(MoofError::runtime("Aborted from break"));
+            }
+            if input == ":locals" {
+                for (id, val) in &env.bindings() {
+                    let name = self.symbols.name(*id);
+                    if !name.starts_with("__") {
+                        eprintln!("  \x1b[36m{}\x1b[0m = {}", name, self.display_value(val));
+                    }
+                }
+                continue;
             }
             if input.starts_with(":continue") {
                 let rest = input.strip_prefix(":continue").unwrap().trim();
