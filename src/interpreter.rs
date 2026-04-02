@@ -5,11 +5,28 @@ use std::rc::Rc;
 
 use crate::cons;
 use crate::environment::Env;
-use crate::error::{MoofError, Result};
+use crate::error::{ErrorKind, MoofError, Result};
 use crate::symbol::{KnownSymbols, SymId, SymbolTable};
 use crate::value::{
     ClosureBody, MoofClass, MoofClosure, MoofObject, MoofTable, NativeFn, Value,
 };
+
+// ═══════════════════════════════════════════════════════════════════════
+// Condition/restart system data structures
+// ═══════════════════════════════════════════════════════════════════════
+
+pub struct HandlerBinding {
+    pub condition_class_name: SymId,
+    pub handler: Value,
+}
+
+pub struct HandlerFrame {
+    pub bindings: Vec<HandlerBinding>,
+}
+
+pub struct RestartFrame {
+    pub restarts: Vec<SymId>,
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // Tail-call optimization
@@ -79,6 +96,10 @@ pub struct Interpreter {
     pub loading_stack: Vec<PathBuf>,
     /// Base directory for stdlib files (set once at startup).
     pub stdlib_dir: Option<PathBuf>,
+
+    // ── Condition/restart system ───────────────────────────────────
+    pub handler_stack: Vec<HandlerFrame>,
+    pub restart_stack: Vec<RestartFrame>,
 
     // ── Baseline snapshot (for image save) ─────────────────────────
     /// (class_name_id, method_selector_id) pairs from after stdlib load.
@@ -304,6 +325,8 @@ impl Interpreter {
             loaded_modules: HashMap::new(),
             loading_stack: Vec::new(),
             stdlib_dir: None,
+            handler_stack: Vec::new(),
+            restart_stack: Vec::new(),
             baseline_methods: HashSet::new(),
             baseline_globals: HashSet::new(),
             baseline_macros: HashSet::new(),
@@ -568,6 +591,7 @@ impl Interpreter {
             ErrorKind::Arity => self.arity_error_class.clone(),
             ErrorKind::Message => self.message_error_class.clone(),
             ErrorKind::IO => self.io_error_class.clone(),
+            ErrorKind::RestartInvoked => self.runtime_error_class.clone(),
         }
     }
 
@@ -658,6 +682,19 @@ impl Interpreter {
                     }
                     if id == k.__primitive {
                         return self.eval_primitive(cdr, env);
+                    }
+                    // Condition/restart system
+                    if id == k.signal {
+                        return self.eval_signal(cdr, env);
+                    }
+                    if id == k.handler_bind {
+                        return self.eval_handler_bind(cdr, env);
+                    }
+                    if id == k.restart_case {
+                        return self.eval_restart_case(cdr, env);
+                    }
+                    if id == k.invoke_restart {
+                        return self.eval_invoke_restart(cdr, env);
                     }
                     if id == k.table {
                         return self.eval_table(cdr, env);
@@ -772,6 +809,10 @@ impl Interpreter {
                         || id == k.send
                         || id == k.super_send
                         || id == k.__primitive
+                        || id == k.signal
+                        || id == k.handler_bind
+                        || id == k.restart_case
+                        || id == k.invoke_restart
                         || id == k.table
                         || id == k.table_array
                         || id == k.str_interp
@@ -1326,6 +1367,7 @@ impl Interpreter {
         let body = nth_car(args, 0)?;
         match self.eval(body, env) {
             Ok(val) => Ok(val),
+            Err(e) if e.kind == ErrorKind::RestartInvoked => Err(e), // pass through
             Err(e) => {
                 // Look for (catch var body) as second arg
                 let catch_form = nth_car(args, 1)?;
@@ -1352,6 +1394,290 @@ impl Interpreter {
                 Err(e)
             }
         }
+    }
+
+    // ── signal ──────────────────────────────────────────────────────
+
+    fn eval_signal(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        let condition_expr = nth_car(args, 0)?;
+        let condition = self.eval(condition_expr, env)?;
+
+        let condition_class = self.class_of(&condition);
+
+        // Walk handler stack top-down
+        for frame_idx in (0..self.handler_stack.len()).rev() {
+            for binding_idx in 0..self.handler_stack[frame_idx].bindings.len() {
+                let binding_class_name = self.handler_stack[frame_idx].bindings[binding_idx].condition_class_name;
+
+                // Check if condition class matches or inherits from handler's target class
+                let matches = {
+                    let mut current = Some(condition_class.clone());
+                    let mut found = false;
+                    while let Some(cls) = current {
+                        if cls.borrow().name == binding_class_name {
+                            found = true;
+                            break;
+                        }
+                        let sup = cls.borrow().superclass.clone();
+                        current = sup;
+                    }
+                    found
+                };
+
+                if matches {
+                    let handler = self.handler_stack[frame_idx].bindings[binding_idx].handler.clone();
+                    match self.invoke(handler, vec![condition.clone()]) {
+                        Ok(_) => {} // handler returned normally, continue
+                        Err(e) if e.kind == ErrorKind::RestartInvoked => return Err(e),
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+
+        // No handler handled it
+        let msg = format!("Unhandled condition: {}", self.display_value(&condition));
+        Err(MoofError::runtime(msg).with_object(condition))
+    }
+
+    // ── handler-bind ───────────────────────────────────────────────
+
+    fn eval_handler_bind(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        // (handler-bind ((CondType handler) ...) body ...)
+        let bindings_list = nth_car(args, 0)?;
+        let body = nth_cdr(args, 0)?;
+
+        let mut bindings = Vec::new();
+        let mut cursor = bindings_list;
+        while let Value::Cons(cell) = cursor {
+            let pair = &cell.car;
+            let class_name_id = nth_car(pair, 0)?.as_symbol().map_err(|_| {
+                MoofError::runtime("handler-bind: expected class name symbol")
+            })?;
+            let handler_expr = nth_car(pair, 1)?;
+            let handler = self.eval(handler_expr, env)?;
+            bindings.push(HandlerBinding { condition_class_name: class_name_id, handler });
+            cursor = &cell.cdr;
+        }
+
+        self.handler_stack.push(HandlerFrame { bindings });
+
+        let mut result = Value::Nil;
+        let mut body_cursor = body;
+        while let Value::Cons(cell) = body_cursor {
+            match self.eval(&cell.car, env) {
+                Ok(val) => result = val,
+                Err(e) if e.kind == ErrorKind::RestartInvoked => {
+                    self.handler_stack.pop();
+                    return Err(e); // pass restart through
+                }
+                Err(e) => {
+                    // Try to handle the error via our handlers
+                    let condition = if let Some(obj) = e.error_object.clone() {
+                        obj
+                    } else {
+                        let cls = self.error_class_for_kind(&e.kind);
+                        self.make_error_object(&cls, &e.message)
+                    };
+                    let condition_class = self.class_of(&condition);
+
+                    // Check our frame's handlers (we're the top frame)
+                    let frame = self.handler_stack.last().unwrap();
+                    let mut handled = false;
+                    for binding in &frame.bindings {
+                        let mut current = Some(condition_class.clone());
+                        let mut matches = false;
+                        while let Some(cls) = current {
+                            if cls.borrow().name == binding.condition_class_name {
+                                matches = true;
+                                break;
+                            }
+                            let sup = cls.borrow().superclass.clone();
+                            current = sup;
+                        }
+                        if matches {
+                            let handler = binding.handler.clone();
+                            match self.invoke(handler, vec![condition.clone()]) {
+                                Ok(_) => {} // handler returned, continue
+                                Err(e2) if e2.kind == ErrorKind::RestartInvoked => {
+                                    self.handler_stack.pop();
+                                    return Err(e2);
+                                }
+                                Err(e2) => {
+                                    self.handler_stack.pop();
+                                    return Err(e2);
+                                }
+                            }
+                            handled = true;
+                            break;
+                        }
+                    }
+                    if !handled {
+                        self.handler_stack.pop();
+                        return Err(e);
+                    }
+                    // If handled (handler returned normally), continue execution
+                    // But we can't continue after an error — return the condition
+                    self.handler_stack.pop();
+                    return Err(e);
+                }
+            }
+            body_cursor = &cell.cdr;
+        }
+
+        self.handler_stack.pop();
+        Ok(result)
+    }
+
+    // ── restart-case ───────────────────────────────────────────────
+
+    fn eval_restart_case(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        // (restart-case expr (restart-name (params) body) ...)
+        let expr = nth_car(args, 0)?;
+        let restart_clauses = nth_cdr(args, 0)?;
+
+        let mut restart_names = Vec::new();
+        let mut cursor = restart_clauses;
+        while let Value::Cons(cell) = cursor {
+            let name_id = nth_car(&cell.car, 0)?.as_symbol().map_err(|_| {
+                MoofError::runtime("restart-case: expected restart name symbol")
+            })?;
+            restart_names.push(name_id);
+            cursor = &cell.cdr;
+        }
+
+        self.restart_stack.push(RestartFrame { restarts: restart_names });
+
+        match self.eval(expr, env) {
+            Ok(val) => { self.restart_stack.pop(); Ok(val) }
+            Err(e) if e.kind == ErrorKind::RestartInvoked => {
+                self.restart_stack.pop();
+                self.dispatch_restart(e, restart_clauses, env)
+            }
+            Err(e) => {
+                // Before giving up, try running the error through the handler stack.
+                // Our restart frame is still active so handlers can invoke our restarts.
+                let condition = if let Some(ref obj) = e.error_object {
+                    obj.clone()
+                } else {
+                    let cls = self.error_class_for_kind(&e.kind);
+                    self.make_error_object(&cls, &e.message)
+                };
+
+                // Try signaling the condition through handlers
+                let signal_result = self.try_handlers_for_condition(&condition);
+                match signal_result {
+                    Err(e2) if e2.kind == ErrorKind::RestartInvoked => {
+                        self.restart_stack.pop();
+                        self.dispatch_restart(e2, restart_clauses, env)
+                    }
+                    _ => {
+                        self.restart_stack.pop();
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Dispatch a RestartInvoked error to the matching restart clause.
+    fn dispatch_restart(&mut self, e: MoofError, restart_clauses: &Value, env: &Env) -> Result<Value> {
+        let error_obj = e.error_object.unwrap_or(Value::Nil);
+        let restart_name_val = if let Value::Table(ref tbl) = error_obj {
+            tbl.borrow().get(&Value::Str(Rc::from("name"))).cloned().unwrap_or(Value::Nil)
+        } else { Value::Nil };
+        let restart_args = if let Value::Table(ref tbl) = error_obj {
+            tbl.borrow().get(&Value::Str(Rc::from("args"))).cloned().unwrap_or(Value::Nil)
+        } else { Value::Nil };
+
+        let restart_name_id = match &restart_name_val {
+            Value::Symbol(id) => *id,
+            _ => return Err(MoofError::runtime("restart-case: invalid restart name")),
+        };
+
+        let mut clause_cursor = restart_clauses;
+        while let Value::Cons(cell) = clause_cursor {
+            let clause = &cell.car;
+            if let Ok(name_id) = nth_car(clause, 0)?.as_symbol() {
+                if name_id == restart_name_id {
+                    let params_expr = nth_car(clause, 1)?;
+                    let body = nth_car(clause, 2)?;
+                    let restart_env = env.child();
+                    let arg_vec = restart_args.to_vec().unwrap_or_default();
+                    let param_vec = crate::cons::cons_to_vec(params_expr);
+                    for (i, p) in param_vec.iter().enumerate() {
+                        if let Value::Symbol(pid) = p {
+                            restart_env.define(*pid, arg_vec.get(i).cloned().unwrap_or(Value::Nil), false);
+                        }
+                    }
+                    return self.eval(body, &restart_env);
+                }
+            }
+            clause_cursor = &cell.cdr;
+        }
+        Err(MoofError::runtime("restart-case: no matching restart"))
+    }
+
+    /// Try running a condition through the handler stack without unwinding.
+    fn try_handlers_for_condition(&mut self, condition: &Value) -> Result<()> {
+        let condition_class = self.class_of(condition);
+
+        for frame_idx in (0..self.handler_stack.len()).rev() {
+            for binding_idx in 0..self.handler_stack[frame_idx].bindings.len() {
+                let binding_class_name = self.handler_stack[frame_idx].bindings[binding_idx].condition_class_name;
+
+                let mut current = Some(condition_class.clone());
+                let mut matches = false;
+                while let Some(cls) = current {
+                    if cls.borrow().name == binding_class_name {
+                        matches = true;
+                        break;
+                    }
+                    let sup = cls.borrow().superclass.clone();
+                    current = sup;
+                }
+
+                if matches {
+                    let handler = self.handler_stack[frame_idx].bindings[binding_idx].handler.clone();
+                    match self.invoke(handler, vec![condition.clone()]) {
+                        Ok(_) => return Ok(()),
+                        Err(e) if e.kind == ErrorKind::RestartInvoked => return Err(e),
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+        Ok(()) // no handler found
+    }
+
+    // ── invoke-restart ─────────────────────────────────────────────
+
+    fn eval_invoke_restart(&mut self, args: &Value, env: &Env) -> Result<Value> {
+        let name_id = nth_car(args, 0)?.as_symbol().map_err(|_| {
+            MoofError::runtime("invoke-restart: expected restart name symbol")
+        })?;
+
+        let exists = self.restart_stack.iter().rev().any(|f| f.restarts.contains(&name_id));
+        if !exists {
+            return Err(MoofError::runtime(format!(
+                "invoke-restart: no active restart named '{}'", self.symbols.name(name_id)
+            )));
+        }
+
+        let rest = nth_cdr(args, 0)?;
+        let restart_args = self.eval_args(rest, env)?;
+
+        let mut tbl = crate::value::MoofTable::new();
+        tbl.hash.insert("name".to_string(), Value::Symbol(name_id));
+        tbl.hash.insert("args".to_string(), Value::from_slice(&restart_args));
+
+        Err(MoofError {
+            kind: ErrorKind::RestartInvoked,
+            message: format!("restart: {}", self.symbols.name(name_id)),
+            line: None,
+            column: None,
+            error_object: Some(Value::Table(Rc::new(RefCell::new(tbl)))),
+        })
     }
 
     // ── defmacro ────────────────────────────────────────────────────

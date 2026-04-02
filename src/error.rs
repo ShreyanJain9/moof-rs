@@ -18,6 +18,9 @@ pub enum ErrorKind {
     Arity,
     Type,
     IO,
+    /// Internal control flow for condition/restart system.
+    /// error_object carries a table with "name" and "args" fields.
+    RestartInvoked,
 }
 
 pub type Result<T> = std::result::Result<T, MoofError>;

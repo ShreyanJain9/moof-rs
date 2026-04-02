@@ -1,0 +1,16 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Conditions — condition/restart system extensions
+;; ═══════════════════════════════════════════════════════════════════════
+
+;; Condition class hierarchy
+(class Condition (extends Error))
+(class Warning (extends Condition))
+(class SimpleWarning (extends Warning))
+
+;; Convenience: signal a warning (handlers can suppress or log)
+(define (warn message)
+  (signal [SimpleWarning new message]))
+
+;; Convenience: create a handler that invokes a named restart
+(define (handler-invoke-restart name . args)
+  { |condition| (apply invoke-restart (cons name args)) })

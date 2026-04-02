@@ -1093,6 +1093,7 @@ fn print_error(e: &MoofError, source: &str) {
         ErrorKind::Arity => "ArityError",
         ErrorKind::Type => "TypeError",
         ErrorKind::IO => "IOError",
+        ErrorKind::RestartInvoked => "RestartError",
     };
     eprintln!("\x1b[31m{kind_label}: {}\x1b[0m", e.message);
 

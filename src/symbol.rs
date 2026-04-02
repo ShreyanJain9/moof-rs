@@ -97,6 +97,10 @@ pub struct KnownSymbols {
     pub classmethod: SymId,
     pub __primitive: SymId,
     pub delegates_to: SymId,
+    pub signal: SymId,
+    pub handler_bind: SymId,
+    pub restart_case: SymId,
+    pub invoke_restart: SymId,
 }
 
 impl KnownSymbols {
@@ -159,6 +163,10 @@ impl KnownSymbols {
             classmethod: syms.intern("classmethod"),
             __primitive: syms.intern("__primitive"),
             delegates_to: syms.intern("delegates-to"),
+            signal: syms.intern("signal"),
+            handler_bind: syms.intern("handler-bind"),
+            restart_case: syms.intern("restart-case"),
+            invoke_restart: syms.intern("invoke-restart"),
         }
     }
 }
