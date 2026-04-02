@@ -85,14 +85,48 @@ fn install_class_class_methods(interp: &mut Interpreter) {
         let class_obj = &args[0];
         let real_class = class_from_class_object(interp, class_obj)?;
         let all_fields = real_class.borrow().all_field_names();
+        // Initialize fields to nil
         let fields = vec![Value::Nil; all_fields.len()];
         let instance = Value::Object(Rc::new(RefCell::new(MoofObject {
-            class: real_class,
+            class: real_class.clone(),
             fields,
         })));
         let init_args: Vec<Value> = args[1..].to_vec();
         let init_sel = interp.symbols.intern("initialize");
-        let _ = interp.send_message(instance.clone(), init_sel, init_args);
+
+        // Check if the class has a custom initialize method
+        let has_custom_init = {
+            let cls = real_class.borrow();
+            if let Some(method) = cls.lookup(init_sel) {
+                // Check it's not the default Object initialize (which is a no-op)
+                match method {
+                    Value::Closure(ref c) => {
+                        match &c.body {
+                            crate::value::ClosureBody::Expr(body) => !matches!(body, Value::Nil),
+                            _ => true, // Native init counts as custom
+                        }
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        };
+
+        if has_custom_init || init_args.is_empty() {
+            // Has custom initialize — call it
+            let _ = interp.send_message(instance.clone(), init_sel, init_args);
+        } else {
+            // No custom initialize, args provided — auto-assign to fields
+            if let Value::Object(ref obj_rc) = instance {
+                let mut obj = obj_rc.borrow_mut();
+                for (i, arg) in init_args.iter().enumerate() {
+                    if i < obj.fields.len() {
+                        obj.fields[i] = arg.clone();
+                    }
+                }
+            }
+        }
         Ok(instance)
     });
 
