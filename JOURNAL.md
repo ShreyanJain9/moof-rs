@@ -786,29 +786,58 @@ Common Lisp-style condition/restart system. Errors become conversations, not cra
 
 The codebase at the end of these sessions:
 
+### Extension API + Moof REPL Object (Session 7 continued)
+
+**Extension API** — Three public methods on Interpreter for Rust code to extend Moof:
+- `interp.register_primitive("name", fn)` — add a `__primitive`
+- `interp.register_global("name", fn)` — add a global function
+- `interp.register_method_on("Class", "sel", fn)` — add a method to a class
+- `define_primitives!` macro for batch registration
+
+Wrapping a Rust library is now ~2 lines Rust + 1 line Moof per function.
+
+**Moof REPL class** (`stdlib/repl.moof`) — The REPL as a customizable Moof object:
+- `[MoofREPL new]` creates an instance with configurable prompt, on-result, on-error
+- `[repl eval: source]`, `[repl parse: source]`, `[repl pretty-print: expr]`
+- `[repl run]` starts the loop — the REPL is the language
+
+**`(break)` sub-REPL** — Drops into an interactive session with access to the local environment. `:continue` to resume, `:abort` to error.
+
+**Type-based pattern matching** — `(match 42 (Integer "int") (Numeric "num") (_ "other"))` works for all types including superclass matching.
+
+**`[obj describe]`** — Inspect any object: shows class, available methods.
+
+**`[Class new args]` auto-assigns fields** when no custom `initialize` is defined.
+
+**New primitives**: `eval_string`, `parse_string` for Moof-level metaprogramming.
+
+---
+
+## Final state
+
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/interpreter.rs` | 3,096 | Tree-walking evaluator, class system, macros, modules, import system, baseline snapshot |
-| `src/repl.rs` | 1,232 | 16 meta-commands (incl. `,save`), tab completion, inspect via message sends |
-| `src/primitives.rs` | 998 | Primitive FFI registry (~50 raw operations + pretty_print) |
+| `src/interpreter.rs` | 3,510 | Evaluator, class system, conditions/restarts, break, extension API |
+| `src/repl.rs` | 1,250 | 17 meta-commands, inspect via messages, restart display |
+| `src/primitives.rs` | 1,020 | Primitive FFI (~55 ops + eval/parse/pretty-print) |
 | `src/compiler.rs` | 927 | AST → bytecode compiler, upvalue resolution |
 | `src/vm.rs` | 732 | Stack-based bytecode VM, inline caching, TCO |
-| `src/parser.rs` | 701 | Recursive descent, all desugaring inline |
-| `src/builtins.rs` | 604 | Variadic globals, Class introspection, Object/Closure/Error intrinsics |
+| `src/parser.rs` | 710 | Recursive descent, default params, all desugaring |
+| `src/builtins.rs` | 640 | Variadic globals, Class.new (auto-fields), introspection |
 | `src/moofint.rs` | 600 | BigInt with auto-promotion |
-| `src/value.rs` | 560 | 11-variant Value enum, Range, display, hashing |
-| `src/pretty.rs` | 469 | Pretty-printer: cons list AST → readable Moof source |
-| `src/image.rs` | 369 | Image serialization: save running state as .moof file |
+| `src/value.rs` | 565 | 11-variant Value enum + MoofClosure defaults field |
+| `src/pretty.rs` | 469 | Pretty-printer: AST → readable Moof |
+| `src/image.rs` | 369 | Image serialization |
 | `src/lexer.rs` | 272 | Tokenizer |
-| `src/bytecode.rs` | 259 | Op enum (31 opcodes), CompiledFunction, builder |
-| `src/symbol.rs` | 207 | Symbol table, pre-interned known symbols |
-| `src/main.rs` | 167 | CLI entry point (`--bytecode` flag) |
-| `src/error.rs` | 152 | Error type with class hierarchy |
+| `src/bytecode.rs` | 259 | 31 opcodes, CompiledFunction, builder |
+| `src/symbol.rs` | 215 | Symbol table, known symbols |
+| `src/main.rs` | 169 | CLI entry point |
+| `src/error.rs` | 153 | Error type with RestartInvoked |
 | `src/cons.rs` | 114 | Cons cells, list iteration |
-| `src/environment.rs` | 95 | Scoped environments with SymId keys |
+| `src/environment.rs` | 95 | Scoped environments |
 | `src/token.rs` | 48 | Token enum |
-| `src/lib.rs` | 18 | Module declarations |
-| `stdlib/*.moof` | 931 | External self-hosting standard library (13 files) |
-| **Total** | **~12,551** | |
+| `src/lib.rs` | 19 | Module declarations |
+| `stdlib/*.moof` | 1,100 | Self-hosting stdlib (15 files incl. conditions, repl) |
+| **Total** | **~13,300** | |
 
-The language went from spec to Ruby prototype to Rust rewrite to Smalltalk-inspired VM to bytecode compiler to self-hosting philosophy rework to image-based REPL in seven sessions. The running system IS the program — experiment in the REPL, `,save` your work, pick up where you left off.
+From spec to self-hosting language with conditions/restarts, image save, DRY features, and a customizable REPL object — in seven sessions.
