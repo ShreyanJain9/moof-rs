@@ -1,0 +1,232 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; TUI — Terminal UI development tools
+;;
+;; Interactive exploration of the Moof runtime from the REPL.
+;; Everything here is a Moof object — the environment IS the language.
+;; ═══════════════════════════════════════════════════════════════════════
+
+;; ── ClassExplorer ────────────────────────────────────────────────────
+;; Browse classes, methods, and source interactively.
+
+(class ClassExplorer (fields current)
+
+  (method initialize ((cls Object))
+    (set! current cls))
+
+  ;; Show current class detail
+  (method show ()
+    (print "")
+    (print (format "\x1b[1m=== ~a ===\x1b[0m" [current name]))
+    (when (not (nil? [current superclass]))
+      (print (format "  \x1b[2mextends\x1b[0m ~a" [[current superclass] name])))
+    (let ((fields [current all-fields]))
+      (when (not (nil? fields))
+        (print (format "  \x1b[2mfields\x1b[0m  ~a" [fields join: ", "]))))
+    (let ((hierarchy [current hierarchy]))
+      (print (format "  \x1b[2mchain\x1b[0m   ~a"
+        [(map { |c| [c name] } hierarchy) join: " > "])))
+    (print "")
+    (let ((methods [current methods]))
+      (when (not (nil? methods))
+        [methods each: { |m|
+          (let ((params [current method-params: m]))
+            (if (nil? params)
+              (print (format "  \x1b[36m~a\x1b[0m" m))
+              (print (format "  \x1b[36m~a\x1b[0m (~a)" m [params join: ", "]))))}]))
+    (print "")
+    self)
+
+  ;; Show source of a method
+  (method source: (sel)
+    (let ((src [current method-source: sel]))
+      (if (nil? src)
+        (print (format "\x1b[31mNo method '~a'\x1b[0m" sel))
+        (do
+          (print (format "\x1b[1m~a >> ~a\x1b[0m" [current name] sel))
+          (print src))))
+    self)
+
+  ;; Navigate to a different class
+  (method goto: (cls)
+    (set! current cls)
+    [self show])
+
+  ;; Go to superclass
+  (method up ()
+    (if (nil? [current superclass])
+      (do (print "\x1b[2mNo superclass\x1b[0m") self)
+      [self goto: [current superclass]]))
+
+  ;; List ALL classes grouped by hierarchy depth
+  (method all ()
+    (print "\x1b[1mAll Classes:\x1b[0m")
+    (let ((classes (all-classes)))
+      (for-each { |cls|
+        (let ((depth (- (length [cls hierarchy]) 1))
+              (indent (string-repeat "  " depth)))
+          (print (format "~a~a (~a methods)"
+            indent [cls name]
+            (length [cls methods])))) }
+        classes))
+    self)
+
+  ;; Interactive session
+  (method run ()
+    [self show]
+    (print "\x1b[2mCommands: source <method>, goto <Class>, up, all, quit\x1b[0m")
+    (define running true)
+    [{ || running } whileTrue: { ||
+      (display "\x1b[33mexplore> \x1b[0m")
+      (let ((input [(__primitive io_read_line) trim]))
+        (cond
+          ((= input "quit") (set! running false))
+          ((= input "up") [self up])
+          ((= input "all") [self all])
+          ((= input "") nil)
+          ([input starts_with: "source "]
+            [self source: [[input split: " "] at: 1]])
+          ([input starts_with: "goto "]
+            (let ((name [[input split: " "] at: 1]))
+              (try
+                [self goto: (__primitive eval_string name)]
+                (catch e (print (format "\x1b[31m~a\x1b[0m" [e message]))))))
+          (else (try
+            (let ((result (__primitive eval_string input)))
+              (print (format "\x1b[32m=> \x1b[0m~a" result)))
+            (catch e (print (format "\x1b[31m~a\x1b[0m" [e message])))))))}])
+)
+
+;; ── MethodInspector ──────────────────────────────────────────────────
+;; Detailed view of a single method.
+
+(class MethodInspector (fields cls selector)
+
+  (method show ()
+    (print (format "\x1b[1m~a >> ~a\x1b[0m" [cls name] selector))
+    (let ((params [cls method-params: selector]))
+      (when (not (nil? params))
+        (print (format "  params: ~a" [params join: ", "]))))
+    (let ((src [cls method-source: selector]))
+      (if (nil? src)
+        (print "  \x1b[2m<native method>\x1b[0m")
+        (do
+          (print "  source:")
+          (print src))))
+    self))
+
+;; ── EnvExplorer ──────────────────────────────────────────────────────
+;; Browse the global environment.
+
+(class EnvExplorer
+
+  (method show ()
+    (print "\x1b[1m=== Environment ===\x1b[0m")
+
+    (let ((globals (all-globals)))
+      (print (format "\x1b[2m~a global bindings\x1b[0m" (length globals))))
+
+    (print "")
+    (print "\x1b[1mClasses:\x1b[0m")
+    (for-each { |cls|
+      (print (format "  ~a (~a methods, ~a fields)"
+        [cls name]
+        (length [cls methods])
+        (length [cls all-fields]))) }
+      (all-classes))
+
+    (print "")
+    (print "\x1b[1mMacros:\x1b[0m")
+    (for-each { |m| (print (format "  ~a" m)) } (all-macros))
+
+    (print "")
+    (let ((protos (all-protocols)))
+      (when (not (nil? protos))
+        (print "\x1b[1mProtocols:\x1b[0m")
+        (for-each { |p|
+          (print (format "  ~a: ~a" [p at: "name"]
+            [([p at: "selectors"]) join: ", "])) }
+          protos)))
+    self)
+
+  ;; Interactive session
+  (method run ()
+    [self show]
+    (print "")
+    (print "\x1b[2mType any expression to evaluate, or 'quit'\x1b[0m")
+    (define running true)
+    [{ || running } whileTrue: { ||
+      (display "\x1b[33menv> \x1b[0m")
+      (let ((input [(__primitive io_read_line) trim]))
+        (if (= input "quit")
+          (set! running false)
+          (if (= input "") nil
+            (try
+              (let ((result (__primitive eval_string input)))
+                (print (format "\x1b[32m=> \x1b[0m~a" result)))
+              (catch e (print (format "\x1b[31m~a\x1b[0m" [e message])))))))}])
+)
+
+;; ── Workspace ────────────────────────────────────────────────────────
+;; Multi-line evaluation with history.
+
+(class Workspace (fields history)
+
+  (method initialize ()
+    (set! history (list)))
+
+  (method eval: (source)
+    (try
+      (let ((result (__primitive eval_string source)))
+        (set! history (cons {input: source, output: (format "~a" result)} history))
+        result)
+      (catch e
+        (set! history (cons {input: source, output: (format "Error: ~a" [e message])} history))
+        nil)))
+
+  (method show-history ()
+    (print "\x1b[1m=== History ===\x1b[0m")
+    (for-each { |entry|
+      (print (format "\x1b[36m> \x1b[0m~a" [entry at: "input"]))
+      (print (format "\x1b[32m  ~a\x1b[0m" [entry at: "output"])) }
+      (reverse history))
+    self)
+
+  (method run ()
+    (print "\x1b[1m=== Workspace ===\x1b[0m")
+    (print "\x1b[2mMulti-line input. :eval to evaluate, :history, :clear, :quit\x1b[0m")
+    (define running true)
+    (define buffer "")
+    [{ || running } whileTrue: { ||
+      (display (if (= buffer "") "\x1b[33mws> \x1b[0m" "\x1b[33m... \x1b[0m"))
+      (let ((input (__primitive io_read_line)))
+        (cond
+          ((= [input trim] ":quit") (set! running false))
+          ((= [input trim] ":history") [self show-history])
+          ((= [input trim] ":clear") (set! buffer ""))
+          ((= [input trim] ":eval")
+            (when (not (= buffer ""))
+              (let ((result [self eval: buffer]))
+                (when (not (nil? result))
+                  (print (format "\x1b[32m=> \x1b[0m~a" result))))
+              (set! buffer "")))
+          (else
+            (set! buffer [buffer concat: input])
+            (set! buffer [buffer concat: "\n"]))))}])
+)
+
+;; ── Convenience entry points ─────────────────────────────────────────
+
+(define (explore (cls Object))
+  (let ((e [ClassExplorer new cls]))
+    [e show]
+    e))
+
+(define (env-browse)
+  (let ((e [EnvExplorer new]))
+    [e show]
+    e))
+
+(define (workspace)
+  (let ((w [Workspace new]))
+    [w run]
+    w))

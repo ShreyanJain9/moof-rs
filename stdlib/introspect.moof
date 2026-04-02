@@ -1,0 +1,66 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; Introspect — deep introspection of the Moof runtime
+;;
+;; Exposes class metadata, method source, field names, protocols.
+;; Everything the development environment needs.
+;; ═══════════════════════════════════════════════════════════════════════
+
+;; ── Class introspection methods ──────────────────────────────────────
+
+(class Class
+  ;; List field names as strings
+  (method all-fields () (__primitive class_field_names self))
+
+  ;; Get pretty-printed source of a method (or "<native>" / nil)
+  (method method-source: (selector) (__primitive class_method_body self selector))
+
+  ;; Get parameter names of a method (excluding self)
+  (method method-params: (selector) (__primitive class_method_params self selector))
+
+  ;; Get the full superclass chain as a list of class objects
+  (method hierarchy () (__primitive class_hierarchy self)))
+
+;; ── Global introspection functions ───────────────────────────────────
+
+;; Return all registered class objects as a list
+(define (all-classes) (__primitive class_all))
+
+;; Return all protocol definitions as [{name, selectors}, ...]
+(define (all-protocols) (__primitive all_protocols))
+
+;; Return all macro names as a list of strings
+(define (all-macros) (__primitive all_macros))
+
+;; Return all global binding names as a list of strings
+(define (all-globals) (__primitive all_globals))
+
+;; ── Convenience: view method source ──────────────────────────────────
+
+(define (source cls selector)
+  (let ((src [cls method-source: selector]))
+    (if (nil? src)
+      (print (format "~a: no method '~a'" [cls name] selector))
+      (print src))
+    nil))
+
+;; ── Convenience: show class detail ───────────────────────────────────
+
+(define (class-detail cls)
+  (print (format "=== ~a ===" [cls name]))
+  (when (not (nil? [cls superclass]))
+    (print (format "  extends: ~a" [[cls superclass] name])))
+  (let ((fields [cls all-fields]))
+    (when (not (nil? fields))
+      (print (format "  fields: ~a" [fields join: ", "]))))
+  (let ((hierarchy [cls hierarchy]))
+    (print (format "  hierarchy: ~a"
+      [[hierarchy map: { |c| [c name] }] join: " > "])))
+  (let ((methods [cls methods]))
+    (when (not (nil? methods))
+      (print (format "  methods (~a):" [methods length]))
+      [methods each: { |m|
+        (let ((params [cls method-params: m]))
+          (if (nil? params)
+            (print (format "    ~a" m))
+            (print (format "    ~a (~a)" m [params join: ", "]))))}]))
+  nil)

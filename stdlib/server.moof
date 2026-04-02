@@ -1,8 +1,8 @@
 ;; ═══════════════════════════════════════════════════════════════════════
 ;; Server — REPL protocol backend
 ;;
-;; A MoofServer is an object that handles REPL protocol messages.
-;; It can be driven by any frontend: CLI, TCP, web, editor plugin.
+;; A MoofServer handles protocol messages from any frontend.
+;; Every response is a table with at least {status: "ok"/"error"}.
 ;; ═══════════════════════════════════════════════════════════════════════
 
 (class MoofServer (fields repl)
@@ -10,40 +10,91 @@
   (method initialize ()
     (set! repl [MoofREPL new]))
 
-  ;; Evaluate source code, return result as a table
+  ;; ── Evaluation ─────────────────────────────────────────────────────
+
   (method handle-eval: (source)
     (try
       (let ((result [repl eval: source]))
-        {status: "ok", value: result, display: (format "~a" result)})
+        {status: "ok",
+         value: result,
+         display: (format "~a" result),
+         type: [[result class] name]})
       (catch e
         {status: "error", message: [e message]})))
 
-  ;; Parse source to AST
   (method handle-parse: (source)
     (try
-      (let ((ast [repl parse: source]))
-        {status: "ok", ast: ast})
+      {status: "ok", ast: [repl parse: source]}
       (catch e
         {status: "error", message: [e message]})))
 
-  ;; Pretty-print an expression
   (method handle-pretty-print: (expr)
     {status: "ok", source: [repl pretty-print: expr]})
 
-  ;; List all classes
+  ;; ── Class introspection ────────────────────────────────────────────
+
   (method handle-classes ()
-    ;; Use the class hierarchy
+    (let ((classes (all-classes)))
+      {status: "ok",
+       classes: (map { |cls|
+         {name: [cls name],
+          superclass: (if (nil? [cls superclass]) nil [[cls superclass] name]),
+          fields: [cls all-fields],
+          method-count: [[cls methods] length]} } classes)}))
+
+  (method handle-class-detail: (cls)
     {status: "ok",
-     classes: (list "Object" "Class" "Numeric" "Integer" "Float"
-                    "String" "Symbol" "Cons" "Table" "Closure"
-                    "Range" "TrueClass" "FalseClass" "NilClass"
-                    "Error" "Condition" "Warning")})
+     name: [cls name],
+     superclass: (if (nil? [cls superclass]) nil [[cls superclass] name]),
+     fields: [cls all-fields],
+     hierarchy: (map { |c| [c name] } [cls hierarchy]),
+     methods: (map { |m|
+       {name: m,
+        params: [cls method-params: m],
+        source: [cls method-source: m]} } [cls methods])})
 
-  ;; Get methods for a class
-  (method handle-methods: (cls)
-    {status: "ok", methods: [cls methods], name: [cls name]})
+  (method handle-method-source: (cls selector)
+    (let ((src [cls method-source: selector]))
+      (if (nil? src)
+        {status: "error", message: (format "No method ~a on ~a" selector [cls name])}
+        {status: "ok", source: src})))
 
-  ;; Run a stdio protocol loop (one message per line, JSON-like tables)
+  ;; ── Object inspection ──────────────────────────────────────────────
+
+  (method handle-inspect: (obj)
+    (let ((cls [obj class]))
+      {status: "ok",
+       class: [cls name],
+       display: (format "~a" obj),
+       fields: (let ((field-names [cls all-fields]))
+                 (if (nil? field-names) (list)
+                   (map { |f| {name: f, value: (format "~a" [obj send: f])} }
+                        field-names))),
+       methods: [cls methods]}))
+
+  ;; ── Environment ────────────────────────────────────────────────────
+
+  (method handle-env ()
+    {status: "ok",
+     globals: (all-globals),
+     macros: (all-macros),
+     protocols: (all-protocols),
+     class-count: (length (all-classes))})
+
+  ;; ── Image ──────────────────────────────────────────────────────────
+
+  (method handle-save: (path)
+    (try
+      (do (save-image path) {status: "ok", path: path})
+      (catch e {status: "error", message: [e message]})))
+
+  (method handle-load: (path)
+    (try
+      (do (require path) {status: "ok", path: path})
+      (catch e {status: "error", message: [e message]})))
+
+  ;; ── Stdio protocol loop ────────────────────────────────────────────
+
   (method run-stdio ()
     (define running true)
     [{ || running } whileTrue: { ||
@@ -51,4 +102,4 @@
         (if (or (nil? line) (= [line trim] ""))
           (set! running false)
           (let ((result [self handle-eval: [line trim]]))
-            (print (format "~a" result)))))}]))
+            (print [result to_json]))))}]))

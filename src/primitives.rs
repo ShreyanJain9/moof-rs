@@ -137,6 +137,16 @@ pub fn install(interp: &mut Interpreter) {
     // ── Type introspection ─────────────────────────────────────────
     reg(interp, "type_of", prim_type_of);
     reg(interp, "closure_arity", prim_closure_arity);
+
+    // ── Deep introspection ────────────────────────────────────────
+    reg(interp, "class_all", prim_class_all);
+    reg(interp, "class_field_names", prim_class_field_names);
+    reg(interp, "class_method_body", prim_class_method_body);
+    reg(interp, "class_method_params", prim_class_method_params);
+    reg(interp, "class_hierarchy", prim_class_hierarchy);
+    reg(interp, "all_protocols", prim_all_protocols);
+    reg(interp, "all_macros", prim_all_macros);
+    reg(interp, "all_globals", prim_all_globals);
     reg(interp, "identity_eq", prim_identity_eq);
 
     // ── Range ──────────────────────────────────────────────────────
@@ -1013,6 +1023,135 @@ fn prim_range_contains(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Va
 // ═══════════════════════════════════════════════════════════════════════
 // Value display
 // ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// Deep introspection primitives
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Return a list of ALL registered class objects.
+fn prim_class_all(interp: &mut Interpreter, _args: Vec<Value>) -> Result<Value> {
+    let classes: Vec<Value> = interp.class_objects.values().cloned().collect();
+    Ok(Value::from_slice(&classes))
+}
+
+/// Given a class object, return a list of field name strings.
+fn prim_class_field_names(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let class_rc = interp.real_class_from_class_object(&args[0])?;
+    let class = class_rc.borrow();
+    let names: Vec<Value> = class.all_field_names().iter()
+        .map(|&id| Value::Str(Rc::from(interp.symbols.name(id))))
+        .collect();
+    Ok(Value::from_slice(&names))
+}
+
+/// Given a class object + selector string, return the method's AST body (or nil for native).
+fn prim_class_method_body(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let class_rc = interp.real_class_from_class_object(&args[0])?;
+    let sel_name = args[1].as_str()?;
+    let sel_id = interp.symbols.intern(sel_name);
+
+    let class = class_rc.borrow();
+    if let Some(method) = class.lookup(sel_id) {
+        if let Value::Closure(ref c) = method {
+            match &c.body {
+                crate::value::ClosureBody::Expr(body) => {
+                    // Pretty-print the method body
+                    let source = crate::pretty::pp_method(
+                        sel_name, &c.params, c.rest_param, body,
+                        &interp.symbols, &interp.known, 0,
+                    );
+                    Ok(Value::Str(Rc::from(source.as_str())))
+                }
+                crate::value::ClosureBody::Native(_) => Ok(Value::Str(Rc::from("<native>"))),
+                crate::value::ClosureBody::Bytecode(_) => Ok(Value::Str(Rc::from("<bytecode>"))),
+            }
+        } else {
+            Ok(Value::Nil)
+        }
+    } else {
+        Ok(Value::Nil)
+    }
+}
+
+/// Given a class object + selector string, return the method's parameter names.
+fn prim_class_method_params(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let class_rc = interp.real_class_from_class_object(&args[0])?;
+    let sel_name = args[1].as_str()?;
+    let sel_id = interp.symbols.intern(sel_name);
+
+    let class = class_rc.borrow();
+    if let Some(method) = class.lookup(sel_id) {
+        if let Value::Closure(ref c) = method {
+            let params: Vec<Value> = c.params.iter()
+                .map(|&id| Value::Str(Rc::from(interp.symbols.name(id))))
+                .filter(|v| if let Value::Str(s) = v { s.as_ref() != "self" } else { true })
+                .collect();
+            Ok(Value::from_slice(&params))
+        } else {
+            Ok(Value::Nil)
+        }
+    } else {
+        Ok(Value::Nil)
+    }
+}
+
+/// Given a class object, return the full superclass chain as a list of class objects.
+fn prim_class_hierarchy(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let class_rc = interp.real_class_from_class_object(&args[0])?;
+    let mut chain = Vec::new();
+
+    // Add the class itself
+    let name_id = class_rc.borrow().name;
+    if let Some(cls_val) = interp.class_objects.get(&name_id) {
+        chain.push(cls_val.clone());
+    }
+
+    // Walk superclass chain
+    let mut current = class_rc.borrow().superclass.clone();
+    while let Some(cls) = current {
+        let sup_name = cls.borrow().name;
+        if let Some(cls_val) = interp.class_objects.get(&sup_name) {
+            chain.push(cls_val.clone());
+        }
+        let next = cls.borrow().superclass.clone();
+        current = next;
+    }
+
+    Ok(Value::from_slice(&chain))
+}
+
+/// Return all protocols as a list of tables: [{name: "Proto", selectors: (sel1 sel2)}]
+fn prim_all_protocols(interp: &mut Interpreter, _args: Vec<Value>) -> Result<Value> {
+    let mut result = Vec::new();
+    for (&name_id, selectors) in &interp.protocol_registry {
+        let mut tbl = MoofTable::new();
+        let name = interp.symbols.name(name_id);
+        tbl.hash.insert("name".to_string(), Value::Str(Rc::from(name)));
+        let sels: Vec<Value> = selectors.iter()
+            .map(|&id| Value::Str(Rc::from(interp.symbols.name(id))))
+            .collect();
+        tbl.hash.insert("selectors".to_string(), Value::from_slice(&sels));
+        result.push(Value::Table(Rc::new(std::cell::RefCell::new(tbl))));
+    }
+    Ok(Value::from_slice(&result))
+}
+
+/// Return all macro names as a list of strings.
+fn prim_all_macros(interp: &mut Interpreter, _args: Vec<Value>) -> Result<Value> {
+    let names: Vec<Value> = interp.macro_registry.keys()
+        .map(|&id| Value::Str(Rc::from(interp.symbols.name(id))))
+        .collect();
+    Ok(Value::from_slice(&names))
+}
+
+/// Return all global binding names as a list of strings.
+fn prim_all_globals(interp: &mut Interpreter, _args: Vec<Value>) -> Result<Value> {
+    let names: Vec<Value> = interp.global_env.bindings().iter()
+        .map(|(id, _)| Value::Str(Rc::from(interp.symbols.name(*id))))
+        .filter(|v| if let Value::Str(s) = v { !s.starts_with("__") } else { true })
+        .collect();
+    Ok(Value::from_slice(&names))
+}
 
 fn prim_obj_to_s(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
     Ok(Value::Str(Rc::from(format!("{}", args[0]).as_str())))

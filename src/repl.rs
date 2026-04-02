@@ -44,6 +44,7 @@ const KEYWORDS: &[&str] = &[
 const META_COMMANDS: &[&str] = &[
     ",help", ",quit", ",exit", ",version", ",env", ",type", ",doc",
     ",methods", ",classes", ",protocols", ",ast", ",load", ",save",
+    ",explore", ",source", ",workspace",
     ",time", ",clear", ",reset",
 ];
 
@@ -494,6 +495,24 @@ fn handle_meta_command(input: &str, interp: &mut Interpreter) {
         ",ast" => cmd_ast(interp, arg),
         ",load" => cmd_load(interp, arg),
         ",save" => cmd_save(interp, arg),
+        ",explore" => {
+            let source = if arg.is_empty() {
+                "(explore)".to_string()
+            } else {
+                format!("(explore {arg})")
+            };
+            let _ = interp.load_source(&source, "<explore>");
+        }
+        ",source" => {
+            if arg.contains(' ') {
+                let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+                let source = format!("(source {} {:?})", parts[0], parts[1]);
+                let _ = interp.load_source(&source, "<source>");
+            } else {
+                println!("\x1b[2mUsage: ,source ClassName method-name\x1b[0m");
+            }
+        }
+        ",workspace" => { let _ = interp.load_source("(workspace)", "<workspace>"); }
         ",time" => cmd_time(interp, arg),
         ",clear" => print!("\x1b[2J\x1b[H"),
         ",reset" => cmd_reset(interp),
@@ -517,6 +536,9 @@ fn cmd_help() {
     println!("  \x1b[36m,ast\x1b[0m             Show parsed (desugared) form of an expression");
     println!("  \x1b[36m,load\x1b[0m            Load a .moof file");
     println!("  \x1b[36m,save\x1b[0m            Save image to .moof file");
+    println!("  \x1b[36m,explore\x1b[0m         Browse classes interactively");
+    println!("  \x1b[36m,source\x1b[0m          Show method source: ,source Integer even?");
+    println!("  \x1b[36m,workspace\x1b[0m       Multi-line eval workspace");
     println!("  \x1b[36m,time\x1b[0m            Benchmark an expression");
     println!("  \x1b[36m,clear\x1b[0m           Clear the screen");
     println!("  \x1b[36m,reset\x1b[0m           Reset the interpreter");
