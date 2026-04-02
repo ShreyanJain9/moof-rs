@@ -129,6 +129,11 @@ pub fn install(interp: &mut Interpreter) {
     reg(interp, "eval_string", prim_eval_string);
     reg(interp, "parse_string", prim_parse_string);
 
+    // ── System ────────────────────────────────────────────────────
+    reg(interp, "env_get", prim_env_get);
+    reg(interp, "env_set", prim_env_set);
+    reg(interp, "shell_exec", prim_shell_exec);
+
     // ── Type introspection ─────────────────────────────────────────
     reg(interp, "type_of", prim_type_of);
     reg(interp, "closure_arity", prim_closure_arity);
@@ -1011,6 +1016,37 @@ fn prim_range_contains(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Va
 
 fn prim_obj_to_s(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
     Ok(Value::Str(Rc::from(format!("{}", args[0]).as_str())))
+}
+
+fn prim_env_get(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let name = args[0].as_str()?;
+    match std::env::var(name) {
+        Ok(val) => Ok(Value::Str(Rc::from(val.as_str()))),
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+fn prim_env_set(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let name = args[0].as_str()?;
+    let val = args[1].as_str()?;
+    unsafe { std::env::set_var(name, val); }
+    Ok(Value::Nil)
+}
+
+fn prim_shell_exec(_interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {
+    let cmd = args[0].as_str()?;
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .map_err(|e| MoofError::io(format!("shell: {e}")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut result = crate::value::MoofTable::new();
+    result.hash.insert("stdout".to_string(), Value::Str(Rc::from(stdout.as_ref())));
+    result.hash.insert("stderr".to_string(), Value::Str(Rc::from(stderr.as_ref())));
+    result.hash.insert("status".to_string(), Value::Integer(MoofInt::from_i64(output.status.code().unwrap_or(-1) as i64)));
+    Ok(Value::Table(Rc::new(std::cell::RefCell::new(result))))
 }
 
 fn prim_eval_string(interp: &mut Interpreter, args: Vec<Value>) -> Result<Value> {

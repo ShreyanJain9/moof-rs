@@ -1,0 +1,23 @@
+;; ═══════════════════════════════════════════════════════════════════════
+;; System — environment variables, shell commands, process info
+;; ═══════════════════════════════════════════════════════════════════════
+
+;; Environment variables
+(define (env name) (__primitive env_get name))
+(define (env-set! name value) (__primitive env_set name value))
+
+;; Shell command execution
+;; Returns a table: {stdout: "...", stderr: "...", status: 0}
+(define (shell cmd) (__primitive shell_exec cmd))
+
+;; Convenience: run shell command and return stdout (trimmed)
+(define (shell! cmd)
+  (let ((result (shell cmd)))
+    [[result at: "stdout"] trim]))
+
+;; File I/O as a class
+(class File
+  (classmethod read: (path) (read-file path))
+  (classmethod write:content: (path content) (write-file path content))
+  (classmethod exists?: (path) (file-exists? path))
+  (classmethod lines: (path) (read-lines path)))
