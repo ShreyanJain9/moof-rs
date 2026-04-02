@@ -12,6 +12,16 @@ fn main() {
     if args.len() == 1 {
         // REPL mode
         moof::repl::run_repl();
+    } else if *args[1] == "--ide" {
+        // Web IDE mode
+        let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8080);
+        let mut interp = Interpreter::new();
+        load_stdlib(&mut interp);
+        interp.snapshot_baseline();
+        if let Err(e) = moof::web::serve(&mut interp, port) {
+            eprintln!("Error: {}", e.message);
+            std::process::exit(1);
+        }
     } else if *args[1] == "-v" || *args[1] == "--version" {
         println!("Moof {VERSION}");
     } else if *args[1] == "-h" || *args[1] == "--help" {
@@ -52,6 +62,7 @@ fn print_usage() {
     println!("Options:");
     println!("  -e <expr>      Evaluate expression and print result");
     println!("  -b, --bytecode Use bytecode VM instead of tree-walker");
+    println!("  --ide [port]   Start web IDE (default port 8080)");
     println!("  -v, --version  Print version");
     println!("  -h, --help     Print this help");
     println!();

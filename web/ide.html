@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Moof IDE</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #1e1e2e; --surface: #181825; --overlay: #313244;
+  --text: #cdd6f4; --subtext: #a6adc8; --dim: #585b70;
+  --blue: #89b4fa; --green: #a6e3a1; --red: #f38ba8;
+  --yellow: #f9e2af; --mauve: #cba6f7; --teal: #94e2d5;
+  --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+body { font-family: var(--mono); font-size: 13px; color: var(--text); background: var(--bg); height: 100vh; display: flex; flex-direction: column; }
+
+/* Header */
+header { background: var(--surface); padding: 8px 16px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--overlay); }
+header h1 { font-size: 15px; color: var(--mauve); font-weight: 600; }
+header .stats { color: var(--dim); font-size: 11px; }
+
+/* Main layout: 3 panes */
+.main { flex: 1; display: flex; overflow: hidden; }
+
+/* Left: class list */
+.class-list { width: 200px; background: var(--surface); border-right: 1px solid var(--overlay); overflow-y: auto; }
+.class-list .section { padding: 4px 8px; color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; margin-top: 8px; }
+.class-list .item { padding: 4px 12px; cursor: pointer; color: var(--subtext); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.class-list .item:hover { background: var(--overlay); color: var(--text); }
+.class-list .item.active { background: var(--overlay); color: var(--blue); }
+.class-list .item .count { color: var(--dim); font-size: 10px; margin-left: 4px; }
+
+/* Middle: method list + details */
+.method-panel { width: 260px; display: flex; flex-direction: column; border-right: 1px solid var(--overlay); }
+.method-header { padding: 8px; background: var(--surface); border-bottom: 1px solid var(--overlay); }
+.method-header .class-name { color: var(--blue); font-size: 14px; font-weight: 600; }
+.method-header .extends { color: var(--dim); font-size: 11px; }
+.method-header .fields { color: var(--yellow); font-size: 11px; margin-top: 2px; }
+.method-header .hierarchy { color: var(--dim); font-size: 10px; margin-top: 2px; }
+.method-list { flex: 1; overflow-y: auto; background: var(--bg); }
+.method-list .item { padding: 3px 12px; cursor: pointer; color: var(--subtext); }
+.method-list .item:hover { background: var(--overlay); color: var(--text); }
+.method-list .item.active { background: var(--overlay); color: var(--green); }
+.method-list .item .params { color: var(--dim); }
+.method-list .item .native { color: var(--red); font-size: 10px; margin-left: 4px; }
+
+/* Right: source + REPL */
+.right-panel { flex: 1; display: flex; flex-direction: column; }
+
+/* Source viewer */
+.source-panel { flex: 1; background: var(--surface); overflow: auto; padding: 12px; }
+.source-panel .title { color: var(--dim); font-size: 11px; margin-bottom: 8px; }
+.source-panel pre { color: var(--text); white-space: pre-wrap; line-height: 1.5; }
+.source-panel .native-badge { display: inline-block; background: var(--overlay); color: var(--red); padding: 2px 8px; border-radius: 3px; font-size: 11px; }
+.source-panel .welcome { color: var(--dim); padding: 40px; text-align: center; }
+.source-panel .welcome h2 { color: var(--mauve); font-size: 18px; margin-bottom: 8px; }
+
+/* REPL */
+.repl-panel { height: 200px; background: var(--bg); border-top: 1px solid var(--overlay); display: flex; flex-direction: column; }
+.repl-output { flex: 1; overflow-y: auto; padding: 8px 12px; font-size: 12px; }
+.repl-output .input { color: var(--blue); }
+.repl-output .result { color: var(--green); }
+.repl-output .error { color: var(--red); }
+.repl-output .type { color: var(--dim); font-size: 10px; margin-left: 8px; }
+.repl-input { display: flex; border-top: 1px solid var(--overlay); background: var(--surface); }
+.repl-input span { padding: 8px; color: var(--mauve); }
+.repl-input input { flex: 1; background: transparent; border: none; color: var(--text); font-family: var(--mono); font-size: 13px; padding: 8px 0; outline: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Moof IDE</h1>
+  <span class="stats" id="stats"></span>
+</header>
+
+<div class="main">
+  <div class="class-list" id="classList"></div>
+  <div class="method-panel">
+    <div class="method-header" id="methodHeader">
+      <div class="class-name">Select a class</div>
+    </div>
+    <div class="method-list" id="methodList"></div>
+  </div>
+  <div class="right-panel">
+    <div class="source-panel" id="sourcePanel">
+      <div class="welcome">
+        <h2>Moof IDE</h2>
+        <p>Select a class, then a method to view its source.</p>
+        <p style="margin-top:12px">Use the REPL below to evaluate expressions.</p>
+      </div>
+    </div>
+    <div class="repl-panel">
+      <div class="repl-output" id="replOutput"></div>
+      <div class="repl-input">
+        <span>moof&gt;</span>
+        <input type="text" id="replInput" placeholder="(+ 1 2)" autofocus>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let currentClass = null;
+let currentMethod = null;
+let history = [];
+let historyIdx = -1;
+
+async function api(endpoint, body = '') {
+  const res = await fetch(API + '/api/' + endpoint, {
+    method: 'POST', body,
+    headers: {'Content-Type': 'text/plain'}
+  });
+  return res.json();
+}
+
+async function loadClasses() {
+  const data = await api('classes');
+  if (data.status !== 'ok') return;
+
+  const list = document.getElementById('classList');
+  const classes = data.classes.sort((a,b) => a.name.localeCompare(b.name));
+
+  // Group by superclass
+  const groups = {};
+  for (const cls of classes) {
+    const group = cls.superclass || 'Root';
+    if (!groups[group]) groups[group] = [];
+    groups[group].push(cls);
+  }
+
+  let html = '';
+  for (const [group, items] of Object.entries(groups).sort()) {
+    html += `<div class="section">${group}</div>`;
+    for (const cls of items) {
+      html += `<div class="item" onclick="selectClass('${cls.name}')">${cls.name}<span class="count">${cls.methods}</span></div>`;
+    }
+  }
+  list.innerHTML = html;
+
+  document.getElementById('stats').textContent = `${classes.length} classes`;
+}
+
+async function selectClass(name) {
+  const data = await api('class-detail', name);
+  if (data.status !== 'ok') return;
+  currentClass = data;
+
+  // Highlight in list
+  document.querySelectorAll('.class-list .item').forEach(el => {
+    el.classList.toggle('active', el.textContent.startsWith(name));
+  });
+
+  // Method header
+  const header = document.getElementById('methodHeader');
+  header.innerHTML = `
+    <div class="class-name">${data.name}</div>
+    ${data.superclass ? `<div class="extends">extends ${data.superclass}</div>` : ''}
+    ${data.fields.length ? `<div class="fields">fields: ${data.fields.join(', ')}</div>` : ''}
+    <div class="hierarchy">${data.hierarchy.join(' > ')}</div>
+  `;
+
+  // Method list
+  const list = document.getElementById('methodList');
+  const methods = data.methods.sort((a,b) => a.name.localeCompare(b.name));
+  list.innerHTML = methods.map(m => {
+    const params = m.params.length ? `<span class="params">(${m.params.join(', ')})</span>` : '';
+    const native = m.native ? '<span class="native">native</span>' : '';
+    return `<div class="item" onclick="selectMethod('${data.name}','${m.name}')">${m.name} ${params}${native}</div>`;
+  }).join('');
+
+  // Clear source
+  document.getElementById('sourcePanel').innerHTML = `
+    <div class="title">${data.name} — ${methods.length} methods</div>
+    <div class="welcome"><p>Select a method to view its source.</p></div>
+  `;
+}
+
+async function selectMethod(className, methodName) {
+  const data = await api('method-source', `${className}.${methodName}`);
+
+  document.querySelectorAll('.method-list .item').forEach(el => {
+    el.classList.toggle('active', el.textContent.startsWith(methodName));
+  });
+
+  const panel = document.getElementById('sourcePanel');
+  if (data.status === 'ok') {
+    if (data.source === '<native>') {
+      panel.innerHTML = `
+        <div class="title">${className} >> ${methodName}</div>
+        <span class="native-badge">Native (Rust)</span>
+      `;
+    } else {
+      panel.innerHTML = `
+        <div class="title">${className} >> ${methodName}</div>
+        <pre>${escapeHtml(data.source)}</pre>
+      `;
+    }
+  }
+}
+
+// REPL
+document.getElementById('replInput').addEventListener('keydown', async (e) => {
+  if (e.key === 'Enter') {
+    const input = e.target.value.trim();
+    if (!input) return;
+    e.target.value = '';
+    history.push(input);
+    historyIdx = history.length;
+
+    const output = document.getElementById('replOutput');
+    output.innerHTML += `<div class="input">&gt; ${escapeHtml(input)}</div>`;
+
+    const data = await api('eval', input);
+    if (data.status === 'ok') {
+      output.innerHTML += `<div class="result">${escapeHtml(data.display)}<span class="type"> : ${data.type}</span></div>`;
+    } else {
+      output.innerHTML += `<div class="error">${escapeHtml(data.message)}</div>`;
+    }
+    output.scrollTop = output.scrollHeight;
+
+    // Refresh classes after eval (might have defined new ones)
+    loadClasses();
+  } else if (e.key === 'ArrowUp') {
+    if (historyIdx > 0) { historyIdx--; e.target.value = history[historyIdx]; }
+    e.preventDefault();
+  } else if (e.key === 'ArrowDown') {
+    if (historyIdx < history.length - 1) { historyIdx++; e.target.value = history[historyIdx]; }
+    else { historyIdx = history.length; e.target.value = ''; }
+    e.preventDefault();
+  }
+});
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Boot
+loadClasses();
+</script>
+</body>
+</html>

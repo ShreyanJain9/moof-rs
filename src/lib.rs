@@ -12,6 +12,7 @@ pub mod builtins;
 pub mod primitives;
 pub mod pretty;
 pub mod image;
+pub mod web;
 pub mod bytecode;
 pub mod compiler;
 pub mod vm;

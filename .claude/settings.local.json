@@ -31,7 +31,10 @@
       "Bash(./target/debug/moof -e '\\(cdr \\(list 1 2 3\\)\\)')",
       "Bash(git merge:*)",
       "Bash(git push:*)",
-      "Bash(for i:*)"
+      "Bash(for i:*)",
+      "Bash(curl -s http://localhost:8081/api/classes)",
+      "Bash(curl -s -X POST http://localhost:8081/api/eval -d '\\(+ 1 2\\)')",
+      "Bash(curl -s -X POST http://localhost:8081/api/class-detail -d 'Integer')"
     ]
   }
 }
