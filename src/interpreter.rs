@@ -457,6 +457,50 @@ impl Interpreter {
         Ok(result)
     }
 
+    // ── Extension API ───────────────────────────────────────────────
+    // These methods allow Rust code to easily extend the Moof runtime.
+
+    /// Register a primitive function accessible via (__primitive name args...).
+    pub fn register_primitive(&mut self, name: &str, f: NativeFn) {
+        let id = self.symbols.intern(name);
+        self.primitive_registry.insert(id, f);
+    }
+
+    /// Register a global function accessible as (name args...).
+    pub fn register_global(&mut self, name: &str, f: NativeFn) {
+        let id = self.symbols.intern(name);
+        let closure = Value::Closure(Rc::new(MoofClosure {
+            name: Some(id),
+            params: vec![],
+            rest_param: None,
+            defaults: Vec::new(),
+            body: ClosureBody::Native(f),
+            env: self.global_env.clone(),
+            upvalues: Vec::new(),
+        }));
+        self.global_env.define(id, closure, false);
+    }
+
+    /// Register a method on a named class.
+    pub fn register_method_on(&mut self, class_name: &str, selector: &str, f: NativeFn) {
+        let class_name_id = self.symbols.intern(class_name);
+        let sel_id = self.symbols.intern(selector);
+        if let Some(class_rc) = self.find_class_by_name(class_name_id, &self.global_env.clone()) {
+            let closure = Value::Closure(Rc::new(MoofClosure {
+                name: Some(sel_id),
+                params: vec![],
+                rest_param: None,
+                defaults: Vec::new(),
+                body: ClosureBody::Native(f),
+                env: self.global_env.clone(),
+                upvalues: Vec::new(),
+            }));
+            class_rc.borrow_mut().add_method(sel_id, closure);
+        }
+    }
+
+    // ── Source loading ──────────────────────────────────────────────
+
     pub fn load_source(&mut self, source: &str, _filename: &str) -> Result<Value> {
         let tokens = crate::lexer::Lexer::new(source).tokenize()?;
         let exprs = crate::parser::Parser::new(tokens, &mut self.symbols).parse_program()?;

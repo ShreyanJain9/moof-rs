@@ -7,6 +7,23 @@ use crate::interpreter::Interpreter;
 use crate::moofint::MoofInt;
 use crate::value::{MoofTable, NativeFn, Value};
 
+/// Macro to reduce boilerplate when registering primitives.
+/// Usage: `define_primitives!(interp, { "name" => |args| { body }, ... })`
+#[macro_export]
+macro_rules! define_primitives {
+    ($interp:expr, { $( $name:expr => |$args:ident| $body:expr ),* $(,)? }) => {
+        $(
+            {
+                fn __prim(_interp: &mut $crate::interpreter::Interpreter, $args: Vec<$crate::value::Value>) -> $crate::error::Result<$crate::value::Value> {
+                    $body
+                }
+                let id = $interp.symbols.intern($name);
+                $interp.primitive_registry.insert(id, __prim);
+            }
+        )*
+    };
+}
+
 /// Install all primitives into the interpreter's primitive registry.
 pub fn install(interp: &mut Interpreter) {
     // ── Numeric (polymorphic) ──────────────────────────────────────
